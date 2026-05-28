@@ -13,8 +13,10 @@ import (
 	"github.com/afahey03/docklab/internal/database"
 	"github.com/afahey03/docklab/internal/handlers"
 	"github.com/afahey03/docklab/internal/middleware"
+	"github.com/afahey03/docklab/internal/repositories"
 	"github.com/afahey03/docklab/internal/services"
 	"github.com/afahey03/docklab/pkg/logger"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,18 +31,33 @@ func main() {
 	}
 	defer dbPool.Close()
 
-	authService := services.NewAuthService(cfg.JWTSecret, cfg.JWTTTLMinutes)
+	if err := database.EnsureSchema(dbPool); err != nil {
+		logr.Error("failed to initialize database schema", "error", err)
+		log.Fatal(err)
+	}
+
+	userRepo := repositories.NewPostgresUserRepository(dbPool)
+	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
 	authHandler := handlers.NewAuthHandler(authService)
 	healthHandler := handlers.NewHealthHandler(dbPool)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173", "http://127.0.0.1:5173"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: false,
+		MaxAge:           12 * time.Hour,
+	}))
 
 	router.GET("/health", healthHandler.GetHealth)
 
 	api := router.Group("/api/v1")
 	auth := api.Group("/auth")
+	auth.POST("/register", authHandler.Register)
 	auth.POST("/login", authHandler.Login)
 
 	// Keep protected routes in a separate group so auth concerns stay in middleware.

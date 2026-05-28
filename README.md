@@ -39,7 +39,8 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - `/health` endpoint
 - PostgreSQL connection pool setup (`pgxpool`)
 - Environment variable configuration
-- JWT auth scaffolding (`/api/v1/auth/login`, protected `/api/v1/auth/me`)
+- JWT auth (`/api/v1/auth/register`, `/api/v1/auth/login`, protected `/api/v1/auth/me`)
+- Password hashing with bcrypt
 - Structured JSON logging (`log/slog`)
 
 ## Local development
@@ -67,6 +68,17 @@ npm run dev
 ```
 
 Frontend runs at `http://localhost:5173`.
+
+## How to use
+
+1. Start the backend and PostgreSQL with Docker Compose.
+2. Start the frontend dev server from the `frontend/` folder.
+3. Open `http://localhost:5173` in your browser.
+4. Create an account on `/register`.
+5. Sign in on `/login`.
+6. After login, you will be redirected to `/dashboard`.
+
+Current available product flow is authentication and dashboard access.
 
 ### 3) Environment configuration
 

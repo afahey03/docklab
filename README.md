@@ -41,6 +41,8 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Environment variable configuration
 - JWT auth (`/api/v1/auth/register`, `/api/v1/auth/login`, protected `/api/v1/auth/me`)
 - Password hashing with bcrypt
+- Environment lifecycle APIs (`/api/v1/environments`, start/stop/delete actions)
+- Local Docker workspace lifecycle via backend service
 - Structured JSON logging (`log/slog`)
 
 ## Local development
@@ -56,6 +58,8 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 ```bash
 docker compose up --build
 ```
+
+This setup mounts the Docker socket into the backend container so environment lifecycle actions can manage local containers.
 
 Backend runs at `http://localhost:8080`.
 
@@ -77,8 +81,9 @@ Frontend runs at `http://localhost:5173`.
 4. Create an account on `/register`.
 5. Sign in on `/login`.
 6. After login, you will be redirected to `/dashboard`.
+7. Use the dashboard to create and manage local Docker environments.
 
-Current available product flow is authentication and dashboard access.
+Current available product flow includes authentication and local environment lifecycle management.
 
 ### 3) Environment configuration
 

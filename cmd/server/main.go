@@ -37,8 +37,11 @@ func main() {
 	}
 
 	userRepo := repositories.NewPostgresUserRepository(dbPool)
+	environmentRepo := repositories.NewPostgresEnvironmentRepository(dbPool)
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
+	environmentService := services.NewEnvironmentService(environmentRepo, services.NewDockerCLIRuntime())
 	authHandler := handlers.NewAuthHandler(authService)
+	environmentHandler := handlers.NewEnvironmentHandler(environmentService)
 	healthHandler := handlers.NewHealthHandler(dbPool)
 
 	router := gin.New()
@@ -64,6 +67,11 @@ func main() {
 	protected := api.Group("")
 	protected.Use(middleware.JWTAuth(authService))
 	protected.GET("/auth/me", authHandler.Me)
+	protected.POST("/environments", environmentHandler.Create)
+	protected.GET("/environments", environmentHandler.List)
+	protected.POST("/environments/:id/start", environmentHandler.Start)
+	protected.POST("/environments/:id/stop", environmentHandler.Stop)
+	protected.DELETE("/environments/:id", environmentHandler.Delete)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

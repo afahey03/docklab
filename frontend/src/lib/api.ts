@@ -15,6 +15,33 @@ type MeResponse = {
     email: string;
 };
 
+export type Environment = {
+    id: string;
+    user_email: string;
+    name: string;
+    image: string;
+    status: string;
+    container_id: string;
+    created_at: string;
+    updated_at: string;
+};
+
+type EnvironmentsResponse = {
+    environments: Environment[];
+};
+
+function withAuthHeaders(headers?: HeadersInit): HeadersInit {
+    const token = getToken();
+    if (!token) {
+        throw new Error("missing auth token");
+    }
+
+    return {
+        Authorization: `Bearer ${token}`,
+        ...(headers ?? {}),
+    };
+}
+
 async function readError(response: Response): Promise<string> {
     try {
         const body = (await response.json()) as ErrorBody;
@@ -41,6 +68,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         throw new Error(await readError(response));
     }
 
+    if (response.status === 204) {
+        return undefined as T;
+    }
+
     return (await response.json()) as T;
 }
 
@@ -63,15 +94,49 @@ export async function register(email: string, password: string): Promise<string>
 }
 
 export async function getMe(): Promise<MeResponse> {
-    const token = getToken();
-    if (!token) {
-        throw new Error("missing auth token");
-    }
-
     return request<MeResponse>("/api/v1/auth/me", {
         method: "GET",
-        headers: {
-            Authorization: `Bearer ${token}`,
-        },
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function getEnvironments(): Promise<Environment[]> {
+    const body = await request<EnvironmentsResponse>("/api/v1/environments", {
+        method: "GET",
+        headers: withAuthHeaders(),
+    });
+
+    return body.environments;
+}
+
+export async function createEnvironment(name: string, image: string): Promise<Environment> {
+    return request<Environment>("/api/v1/environments", {
+        method: "POST",
+        headers: withAuthHeaders(),
+        body: JSON.stringify({
+            name: name.trim(),
+            image: image.trim(),
+        }),
+    });
+}
+
+export async function startEnvironment(id: string): Promise<Environment> {
+    return request<Environment>(`/api/v1/environments/${id}/start`, {
+        method: "POST",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function stopEnvironment(id: string): Promise<Environment> {
+    return request<Environment>(`/api/v1/environments/${id}/stop`, {
+        method: "POST",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function deleteEnvironment(id: string): Promise<void> {
+    await request<unknown>(`/api/v1/environments/${id}`, {
+        method: "DELETE",
+        headers: withAuthHeaders(),
     });
 }

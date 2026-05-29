@@ -10,8 +10,11 @@ services:
       DATABASE_URL: host=postgres port=5432 user=postgres dbname=docklab sslmode=disable
       JWT_SECRET: dev-secret-change-me
       JWT_TTL_MINUTES: "60"
+      DOCKER_HOST: unix:///var/run/docker.sock
     ports:
       - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

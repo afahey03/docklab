@@ -34,5 +34,24 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to create users table: %w", err)
 	}
 
+	const environmentsTable = `
+		CREATE TABLE IF NOT EXISTS environments (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			image TEXT NOT NULL,
+			status TEXT NOT NULL,
+			container_id TEXT NOT NULL UNIQUE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_environments_user_email ON environments(user_email);
+	`
+
+	if _, err := pool.Exec(ctx, environmentsTable); err != nil {
+		return fmt.Errorf("failed to create environments table: %w", err)
+	}
+
 	return nil
 }

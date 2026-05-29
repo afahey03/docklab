@@ -85,6 +85,11 @@ Frontend runs at `http://localhost:5173`.
 7. Use the dashboard to create and manage local Docker environments.
 8. Open Terminal on a running environment to run shell commands from the browser.
 
+Terminal tips:
+- Copy selected terminal text with `Ctrl+Shift+C`.
+- Paste with `Ctrl+Shift+V`.
+- Use `Reconnect` in the terminal panel if the socket drops.
+
 Current available product flow includes authentication, local environment lifecycle management, and browser terminal access.
 
 ### 3) Environment configuration

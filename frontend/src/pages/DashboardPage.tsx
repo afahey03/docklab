@@ -14,6 +14,8 @@ import {
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
 
+type EnvironmentAction = "start" | "stop" | "delete";
+
 export function DashboardPage() {
     const navigate = useNavigate();
     const [email, setEmail] = useState("");
@@ -21,12 +23,17 @@ export function DashboardPage() {
     const [name, setName] = useState("");
     const [image, setImage] = useState("alpine:3.20");
     const [error, setError] = useState("");
-    const [isBusy, setIsBusy] = useState(false);
+    const [isCreating, setIsCreating] = useState(false);
+    const [pendingActions, setPendingActions] = useState<Record<string, EnvironmentAction | undefined>>({});
     const [activeTerminalEnvironmentId, setActiveTerminalEnvironmentId] = useState("");
+    const [terminalConnected, setTerminalConnected] = useState(false);
     const terminalContainerRef = useRef<HTMLDivElement | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const xtermRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
+    const terminalReconnectTimerRef = useRef<number | null>(null);
+    const manualTerminalCloseRef = useRef(false);
+    const reconnectAttemptsRef = useRef(0);
 
     useEffect(() => {
         if (!terminalContainerRef.current) {
@@ -37,6 +44,7 @@ export function DashboardPage() {
         const terminal = new Terminal({
             cursorBlink: true,
             convertEol: true,
+            scrollback: 2000,
             fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace",
             fontSize: 13,
             rows: 24,
@@ -51,6 +59,29 @@ export function DashboardPage() {
         terminal.open(terminalContainerRef.current);
         fitAddon.fit();
         terminal.writeln("[docklab] terminal ready");
+
+        terminal.attachCustomKeyEventHandler((event) => {
+            if (event.ctrlKey && event.shiftKey && event.code === "KeyC") {
+                const selection = terminal.getSelection();
+                if (selection) {
+                    void navigator.clipboard.writeText(selection);
+                }
+                return false;
+            }
+
+            if (event.ctrlKey && event.shiftKey && event.code === "KeyV") {
+                void navigator.clipboard.readText().then((text) => {
+                    const socket = wsRef.current;
+                    if (!socket || socket.readyState !== WebSocket.OPEN || text.length === 0) {
+                        return;
+                    }
+                    socket.send(JSON.stringify({ type: "input", data: text }));
+                });
+                return false;
+            }
+
+            return true;
+        });
 
         const inputDisposable = terminal.onData((data) => {
             const socket = wsRef.current;
@@ -81,6 +112,10 @@ export function DashboardPage() {
         window.addEventListener("resize", handleWindowResize);
 
         return () => {
+            if (terminalReconnectTimerRef.current !== null) {
+                window.clearTimeout(terminalReconnectTimerRef.current);
+                terminalReconnectTimerRef.current = null;
+            }
             window.removeEventListener("resize", handleWindowResize);
             inputDisposable.dispose();
             resizeDisposable.dispose();
@@ -111,6 +146,10 @@ export function DashboardPage() {
                 wsRef.current.close();
                 wsRef.current = null;
             }
+            if (terminalReconnectTimerRef.current !== null) {
+                window.clearTimeout(terminalReconnectTimerRef.current);
+                terminalReconnectTimerRef.current = null;
+            }
         };
     }, []);
 
@@ -121,31 +160,33 @@ export function DashboardPage() {
     }
 
     function closeTerminal() {
+        manualTerminalCloseRef.current = Boolean(wsRef.current);
         if (wsRef.current) {
             wsRef.current.close();
             wsRef.current = null;
         }
+        if (terminalReconnectTimerRef.current !== null) {
+            window.clearTimeout(terminalReconnectTimerRef.current);
+            terminalReconnectTimerRef.current = null;
+        }
+
+        reconnectAttemptsRef.current = 0;
+        setTerminalConnected(false);
         setActiveTerminalEnvironmentId("");
     }
 
-    function openTerminal(environmentId: string) {
-        const token = getToken();
-        if (!token) {
-            setError("missing auth token");
-            return;
-        }
-
-        closeTerminal();
-        setError("");
+    function connectTerminal(environmentId: string) {
         const terminal = xtermRef.current;
         if (!terminal) {
             setError("terminal is not initialized");
             return;
         }
 
-        terminal.clear();
-        terminal.writeln("[docklab] connecting to terminal...");
-        setActiveTerminalEnvironmentId(environmentId);
+        const token = getToken();
+        if (!token) {
+            setError("missing auth token");
+            return;
+        }
 
         const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.toString() ?? "http://localhost:8080";
         const wsBase = apiBaseUrl.replace("http://", "ws://").replace("https://", "wss://");
@@ -153,6 +194,8 @@ export function DashboardPage() {
 
         const socket = new WebSocket(wsUrl);
         socket.onopen = () => {
+            reconnectAttemptsRef.current = 0;
+            setTerminalConnected(true);
             terminal.writeln("[docklab] terminal connected");
             fitAddonRef.current?.fit();
             socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
@@ -164,12 +207,59 @@ export function DashboardPage() {
             terminal.writeln("\r\n[docklab] terminal connection error");
         };
         socket.onclose = () => {
-            terminal.writeln("\r\n[docklab] terminal disconnected");
+            setTerminalConnected(false);
             wsRef.current = null;
-            setActiveTerminalEnvironmentId("");
+
+            if (manualTerminalCloseRef.current) {
+                manualTerminalCloseRef.current = false;
+                terminal.writeln("\r\n[docklab] terminal disconnected");
+                setActiveTerminalEnvironmentId("");
+                return;
+            }
+
+            reconnectAttemptsRef.current += 1;
+            if (reconnectAttemptsRef.current > 5) {
+                terminal.writeln("\r\n[docklab] terminal disconnected; reconnect limit reached");
+                return;
+            }
+
+            terminal.writeln("\r\n[docklab] terminal disconnected; reconnecting...");
+            if (terminalReconnectTimerRef.current !== null) {
+                window.clearTimeout(terminalReconnectTimerRef.current);
+            }
+            terminalReconnectTimerRef.current = window.setTimeout(() => {
+                connectTerminal(environmentId);
+            }, 1500);
         };
 
         wsRef.current = socket;
+    }
+
+    function openTerminal(environmentId: string) {
+        closeTerminal();
+        setError("");
+        const terminal = xtermRef.current;
+        if (!terminal) {
+            setError("terminal is not initialized");
+            return;
+        }
+
+        terminal.clear();
+        terminal.writeln("[docklab] connecting to terminal...");
+        setActiveTerminalEnvironmentId(environmentId);
+        connectTerminal(environmentId);
+    }
+
+    function reconnectTerminal() {
+        if (!activeTerminalEnvironmentId || terminalConnected) {
+            return;
+        }
+
+        const terminal = xtermRef.current;
+        if (terminal) {
+            terminal.writeln("[docklab] reconnect requested");
+        }
+        connectTerminal(activeTerminalEnvironmentId);
     }
 
     async function refreshEnvironments() {
@@ -177,9 +267,29 @@ export function DashboardPage() {
         setEnvironments(envs);
     }
 
+    function setEnvironmentPendingAction(id: string, action?: EnvironmentAction) {
+        setPendingActions((previous) => {
+            const next = { ...previous };
+            if (action) {
+                next[id] = action;
+            } else {
+                delete next[id];
+            }
+            return next;
+        });
+    }
+
+    function isEnvironmentPending(id: string) {
+        return Boolean(pendingActions[id]);
+    }
+
+    function isEnvironmentActionPending(id: string, action: EnvironmentAction) {
+        return pendingActions[id] === action;
+    }
+
     async function handleCreateEnvironment() {
         setError("");
-        setIsBusy(true);
+        setIsCreating(true);
         try {
             await createEnvironment(name, image);
             setName("");
@@ -187,46 +297,46 @@ export function DashboardPage() {
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to create environment");
         } finally {
-            setIsBusy(false);
+            setIsCreating(false);
         }
     }
 
     async function handleStartEnvironment(id: string) {
         setError("");
-        setIsBusy(true);
+        setEnvironmentPendingAction(id, "start");
         try {
             await startEnvironment(id);
             await refreshEnvironments();
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to start environment");
         } finally {
-            setIsBusy(false);
+            setEnvironmentPendingAction(id);
         }
     }
 
     async function handleStopEnvironment(id: string) {
         setError("");
-        setIsBusy(true);
+        setEnvironmentPendingAction(id, "stop");
         try {
             await stopEnvironment(id);
             await refreshEnvironments();
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to stop environment");
         } finally {
-            setIsBusy(false);
+            setEnvironmentPendingAction(id);
         }
     }
 
     async function handleDeleteEnvironment(id: string) {
         setError("");
-        setIsBusy(true);
+        setEnvironmentPendingAction(id, "delete");
         try {
             await deleteEnvironment(id);
             await refreshEnvironments();
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to delete environment");
         } finally {
-            setIsBusy(false);
+            setEnvironmentPendingAction(id);
         }
     }
 
@@ -280,10 +390,10 @@ export function DashboardPage() {
                             <button
                                 className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
                                 type="button"
-                                disabled={isBusy}
+                                disabled={isCreating}
                                 onClick={handleCreateEnvironment}
                             >
-                                {isBusy ? "Working..." : "Create"}
+                                {isCreating ? "Working..." : "Create"}
                             </button>
                         </div>
                         {error ? <p className="mt-3 text-sm text-rose-400">{error}</p> : null}
@@ -314,31 +424,31 @@ export function DashboardPage() {
                                             <button
                                                 className="rounded-md border border-emerald-700 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                 type="button"
-                                                disabled={isBusy || env.status === "running"}
+                                                disabled={isEnvironmentPending(env.id) || env.status === "running"}
                                                 onClick={() => handleStartEnvironment(env.id)}
                                             >
-                                                Start
+                                                {isEnvironmentActionPending(env.id, "start") ? "Starting..." : "Start"}
                                             </button>
                                             <button
                                                 className="rounded-md border border-amber-700 px-3 py-1 text-xs text-amber-300 hover:bg-amber-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                 type="button"
-                                                disabled={isBusy || env.status !== "running"}
+                                                disabled={isEnvironmentPending(env.id) || env.status !== "running"}
                                                 onClick={() => handleStopEnvironment(env.id)}
                                             >
-                                                Stop
+                                                {isEnvironmentActionPending(env.id, "stop") ? "Stopping..." : "Stop"}
                                             </button>
                                             <button
                                                 className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950"
                                                 type="button"
-                                                disabled={isBusy}
+                                                disabled={isEnvironmentPending(env.id)}
                                                 onClick={() => handleDeleteEnvironment(env.id)}
                                             >
-                                                Delete
+                                                {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
                                             </button>
                                             <button
                                                 className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                 type="button"
-                                                disabled={env.status !== "running"}
+                                                disabled={env.status !== "running" || isEnvironmentPending(env.id)}
                                                 onClick={() => openTerminal(env.id)}
                                             >
                                                 Terminal
@@ -353,14 +463,24 @@ export function DashboardPage() {
                     <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                         <div className="flex items-center justify-between">
                             <h3 className="font-medium">Browser terminal</h3>
-                            <button
-                                className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                type="button"
-                                disabled={!activeTerminalEnvironmentId}
-                                onClick={closeTerminal}
-                            >
-                                Close session
-                            </button>
+                            <div className="flex gap-2">
+                                <button
+                                    className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50"
+                                    type="button"
+                                    disabled={!activeTerminalEnvironmentId || terminalConnected}
+                                    onClick={reconnectTerminal}
+                                >
+                                    Reconnect
+                                </button>
+                                <button
+                                    className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                    type="button"
+                                    disabled={!activeTerminalEnvironmentId}
+                                    onClick={closeTerminal}
+                                >
+                                    Close session
+                                </button>
+                            </div>
                         </div>
 
                         {!activeTerminalEnvironmentId ? (
@@ -368,9 +488,14 @@ export function DashboardPage() {
                                 Select Terminal on a running environment to start a shell session.
                             </p>
                         ) : (
-                            <p className="mt-2 text-xs text-slate-400">
-                                Active environment: {activeTerminalEnvironmentId}
-                            </p>
+                            <div className="mt-2 flex items-center justify-between">
+                                <p className="text-xs text-slate-400">
+                                    Active environment: {activeTerminalEnvironmentId}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                    {terminalConnected ? "Connected" : "Disconnected"} | Copy: Ctrl+Shift+C | Paste: Ctrl+Shift+V
+                                </p>
+                            </div>
                         )}
 
                         <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2">

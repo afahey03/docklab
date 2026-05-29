@@ -13,9 +13,9 @@ Terraform Runner Service (planned)
     ↓
 AWS EC2 Instance (planned)
     ↓
-Docker Workspace Container (planned)
+Docker Workspace Container
     ↓
-Browser Terminal via WebSockets (planned)
+Browser Terminal via WebSockets (PTY + xterm.js)
 ```
 
 ## Repository layout

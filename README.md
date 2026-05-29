@@ -43,6 +43,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Password hashing with bcrypt
 - Environment lifecycle APIs (`/api/v1/environments`, start/stop/delete actions)
 - Local Docker workspace lifecycle via backend service
+- PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)
 
 ## Local development
@@ -82,8 +83,9 @@ Frontend runs at `http://localhost:5173`.
 5. Sign in on `/login`.
 6. After login, you will be redirected to `/dashboard`.
 7. Use the dashboard to create and manage local Docker environments.
+8. Open Terminal on a running environment to run shell commands from the browser.
 
-Current available product flow includes authentication and local environment lifecycle management.
+Current available product flow includes authentication, local environment lifecycle management, and browser terminal access.
 
 ### 3) Environment configuration
 

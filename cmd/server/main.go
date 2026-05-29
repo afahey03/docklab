@@ -40,8 +40,10 @@ func main() {
 	environmentRepo := repositories.NewPostgresEnvironmentRepository(dbPool)
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
 	environmentService := services.NewEnvironmentService(environmentRepo, services.NewDockerCLIRuntime())
+	terminalService := services.NewTerminalService(environmentRepo)
 	authHandler := handlers.NewAuthHandler(authService)
 	environmentHandler := handlers.NewEnvironmentHandler(environmentService)
+	terminalHandler := handlers.NewTerminalHandler(authService, terminalService)
 	healthHandler := handlers.NewHealthHandler(dbPool)
 
 	router := gin.New()
@@ -59,6 +61,8 @@ func main() {
 	router.GET("/health", healthHandler.GetHealth)
 
 	api := router.Group("/api/v1")
+	api.GET("/environments/:id/terminal/ws", terminalHandler.WebSocket)
+
 	auth := api.Group("/auth")
 	auth.POST("/register", authHandler.Register)
 	auth.POST("/login", authHandler.Login)

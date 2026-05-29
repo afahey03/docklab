@@ -23,7 +23,7 @@ type Claims struct {
 
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrWeakPassword      = errors.New("password must be at least 8 characters")
+	ErrWeakPassword       = errors.New("password must be at least 8 characters")
 )
 
 func NewAuthService(userRepo repositories.UserRepository, secret string, ttlMinutes int) *AuthService {

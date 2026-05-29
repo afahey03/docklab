@@ -5,8 +5,8 @@ import (
 	"errors"
 
 	"github.com/afahey03/docklab/internal/models"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

@@ -9,6 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type APIErrorResponse struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
 type EnvironmentHandler struct {
 	environmentService *services.EnvironmentService
 }
@@ -154,29 +159,35 @@ func (h *EnvironmentHandler) GetOperation(c *gin.Context) {
 
 func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	if errors.Is(err, repositories.ErrEnvironmentNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "environment not found"})
+		c.JSON(http.StatusNotFound, APIErrorResponse{Code: "environment_not_found", Error: "environment not found"})
 		return
 	}
 	if errors.Is(err, services.ErrDockerUnavailable) {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "docker_unavailable", Error: err.Error()})
 		return
 	}
 	if errors.Is(err, services.ErrTerraformUnavailable) {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "terraform_unavailable", Error: err.Error()})
 		return
 	}
 	if errors.Is(err, services.ErrProvisionInProgress) {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, APIErrorResponse{Code: "provision_in_progress", Error: err.Error()})
 		return
 	}
 	if errors.Is(err, services.ErrOperationInProgress) {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, APIErrorResponse{Code: "operation_in_progress", Error: err.Error()})
 		return
 	}
 	if errors.Is(err, services.ErrOperationNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "operation not found"})
+		c.JSON(http.StatusNotFound, APIErrorResponse{Code: "operation_not_found", Error: "operation not found"})
 		return
 	}
 
-	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	var validationErr *services.ProvisionValidationError
+	if errors.As(err, &validationErr) {
+		c.JSON(http.StatusBadRequest, APIErrorResponse{Code: validationErr.Code, Error: validationErr.Error()})
+		return
+	}
+
+	c.JSON(http.StatusInternalServerError, APIErrorResponse{Code: "internal_error", Error: err.Error()})
 }

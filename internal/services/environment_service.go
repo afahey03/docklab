@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -35,6 +36,28 @@ var ErrDockerUnavailable = errors.New("docker CLI is not installed or unavailabl
 var ErrProvisionInProgress = errors.New("provisioning is already in progress for this environment")
 var ErrOperationNotFound = errors.New("operation not found")
 var ErrOperationInProgress = errors.New("another long-running operation is already in progress for this environment")
+
+type ProvisionValidationError struct {
+	Code    string
+	Message string
+}
+
+func (e *ProvisionValidationError) Error() string {
+	if e == nil {
+		return "invalid provisioning request"
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	return "invalid provisioning request"
+}
+
+var (
+	awsRegionPattern    = regexp.MustCompile(`^[a-z]{2}(-gov)?-[a-z]+-\d$`)
+	instanceTypePattern = regexp.MustCompile(`^[a-z][a-z0-9]*\.[a-z0-9]+$`)
+	amiPattern          = regexp.MustCompile(`^ami-[0-9a-fA-F]{8,17}$`)
+	keyNamePattern      = regexp.MustCompile(`^[A-Za-z0-9._-]{1,255}$`)
+)
 
 type ContainerRuntime interface {
 	CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error)
@@ -107,6 +130,11 @@ func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRep
 }
 
 func (s *EnvironmentService) QueueProvisionEnvironment(ctx context.Context, id, userEmail string, req ProvisionRequest) (*models.Operation, error) {
+	sanitizedReq, err := validateProvisionRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
 	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
 	if err != nil {
 		return nil, err
@@ -123,7 +151,7 @@ func (s *EnvironmentService) QueueProvisionEnvironment(ctx context.Context, id, 
 	}
 
 	return s.queueOperation(ctx, userEmail, env.ID, opTypeProvision, func() error {
-		_, provisionErr := s.ProvisionEnvironment(context.Background(), env.ID, userEmail, req)
+		_, provisionErr := s.ProvisionEnvironment(context.Background(), env.ID, userEmail, sanitizedReq)
 		return provisionErr
 	})
 }
@@ -379,4 +407,38 @@ func generateEnvironmentName(userEmail string) string {
 	randSource := rand.New(rand.NewSource(time.Now().UnixNano()))
 	suffix := randSource.Intn(9000) + 1000
 	return fmt.Sprintf("docklab-%s-%d", base, suffix)
+}
+
+func validateProvisionRequest(req ProvisionRequest) (ProvisionRequest, error) {
+	req.Region = strings.TrimSpace(req.Region)
+	req.InstanceType = strings.TrimSpace(req.InstanceType)
+	req.AMI = strings.TrimSpace(req.AMI)
+	req.KeyName = strings.TrimSpace(req.KeyName)
+
+	if req.Region == "" {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_region", Message: "region is required"}
+	}
+	if !awsRegionPattern.MatchString(req.Region) {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_region", Message: "region must match AWS region format (for example, us-east-1)"}
+	}
+
+	if req.InstanceType == "" {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_instance_type", Message: "instance_type is required"}
+	}
+	if !instanceTypePattern.MatchString(req.InstanceType) {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_instance_type", Message: "instance_type must match EC2 instance type format (for example, t3.micro)"}
+	}
+
+	if req.AMI == "" {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_ami", Message: "ami is required"}
+	}
+	if !amiPattern.MatchString(req.AMI) {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_ami", Message: "ami must match AMI ID format (for example, ami-0c2b8ca1dad447f8a)"}
+	}
+
+	if req.KeyName != "" && !keyNamePattern.MatchString(req.KeyName) {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_key_name", Message: "key_name may only include letters, numbers, dot, underscore, and hyphen"}
+	}
+
+	return req, nil
 }

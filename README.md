@@ -46,6 +46,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Terraform cloud-termination API (`/api/v1/environments/:id/destroy-cloud`)
 - Async operation status API (`/api/v1/operations/:id`)
 - Postgres-persisted operation tracking for async cloud workflows
+- Typed provisioning validation errors (`code` + `error`) for clearer client handling
 - Local Docker workspace lifecycle via backend service
 - PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)

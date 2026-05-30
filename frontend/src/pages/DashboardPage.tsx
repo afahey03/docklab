@@ -8,13 +8,14 @@ import {
     deleteEnvironment,
     getEnvironments,
     getMe,
+    provisionEnvironment,
     startEnvironment,
     stopEnvironment,
     type Environment,
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
 
-type EnvironmentAction = "start" | "stop" | "delete";
+type EnvironmentAction = "start" | "stop" | "delete" | "provision";
 
 export function DashboardPage() {
     const navigate = useNavigate();
@@ -22,6 +23,10 @@ export function DashboardPage() {
     const [environments, setEnvironments] = useState<Environment[]>([]);
     const [name, setName] = useState("");
     const [image, setImage] = useState("alpine:3.20");
+    const [awsRegion, setAWSRegion] = useState("us-east-1");
+    const [instanceType, setInstanceType] = useState("t3.micro");
+    const [amiID, setAMIID] = useState("ami-0c2b8ca1dad447f8a");
+    const [keyName, setKeyName] = useState("");
     const [error, setError] = useState("");
     const [isCreating, setIsCreating] = useState(false);
     const [pendingActions, setPendingActions] = useState<Record<string, EnvironmentAction | undefined>>({});
@@ -331,10 +336,39 @@ export function DashboardPage() {
         setError("");
         setEnvironmentPendingAction(id, "delete");
         try {
+            const env = environments.find((item) => item.id === id);
+            const hasCloudResources = Boolean(env?.instance_id || env?.terraform_dir || env?.cloud_status === "provisioned");
+            const confirmed = window.confirm(
+                hasCloudResources
+                    ? "Delete this environment and terminate its provisioned EC2 infrastructure?"
+                    : "Delete this environment?",
+            );
+            if (!confirmed) {
+                return;
+            }
+
             await deleteEnvironment(id);
             await refreshEnvironments();
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to delete environment");
+        } finally {
+            setEnvironmentPendingAction(id);
+        }
+    }
+
+    async function handleProvisionEnvironment(id: string) {
+        setError("");
+        setEnvironmentPendingAction(id, "provision");
+        try {
+            await provisionEnvironment(id, {
+                region: awsRegion.trim(),
+                instance_type: instanceType.trim(),
+                ami: amiID.trim(),
+                key_name: keyName.trim(),
+            });
+            await refreshEnvironments();
+        } catch (requestError) {
+            setError(requestError instanceof Error ? requestError.message : "failed to provision environment");
         } finally {
             setEnvironmentPendingAction(id);
         }
@@ -400,6 +434,40 @@ export function DashboardPage() {
                     </article>
 
                     <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                        <h3 className="font-medium">Cloud provisioning defaults</h3>
+                        <p className="mt-1 text-sm text-slate-400">
+                            Used when you click Provision on an environment.
+                        </p>
+
+                        <div className="mt-4 grid gap-3 md:grid-cols-2">
+                            <input
+                                className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                placeholder="AWS region"
+                                value={awsRegion}
+                                onChange={(event) => setAWSRegion(event.target.value)}
+                            />
+                            <input
+                                className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                placeholder="Instance type"
+                                value={instanceType}
+                                onChange={(event) => setInstanceType(event.target.value)}
+                            />
+                            <input
+                                className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                placeholder="AMI ID"
+                                value={amiID}
+                                onChange={(event) => setAMIID(event.target.value)}
+                            />
+                            <input
+                                className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                placeholder="EC2 key pair name (optional)"
+                                value={keyName}
+                                onChange={(event) => setKeyName(event.target.value)}
+                            />
+                        </div>
+                    </article>
+
+                    <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                         <h3 className="font-medium">Your environments</h3>
                         {environments.length === 0 ? (
                             <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
@@ -414,6 +482,13 @@ export function DashboardPage() {
                                             <div>
                                                 <p className="font-medium text-slate-100">{env.name}</p>
                                                 <p className="text-xs text-slate-400">{env.image}</p>
+                                                <p className="text-xs text-slate-500">
+                                                    Cloud: {env.cloud_status || "not_provisioned"}
+                                                    {env.public_ip ? ` | IP: ${env.public_ip}` : ""}
+                                                </p>
+                                                {env.cloud_error ? (
+                                                    <p className="text-xs text-rose-400">{env.cloud_error}</p>
+                                                ) : null}
                                             </div>
                                             <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
                                                 {env.status}
@@ -452,6 +527,14 @@ export function DashboardPage() {
                                                 onClick={() => openTerminal(env.id)}
                                             >
                                                 Terminal
+                                            </button>
+                                            <button
+                                                className="rounded-md border border-indigo-700 px-3 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                type="button"
+                                                disabled={isEnvironmentPending(env.id)}
+                                                onClick={() => handleProvisionEnvironment(env.id)}
+                                            >
+                                                {isEnvironmentActionPending(env.id, "provision") ? "Provisioning..." : "Provision"}
                                             </button>
                                         </div>
                                     </div>

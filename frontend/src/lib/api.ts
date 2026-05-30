@@ -22,8 +22,21 @@ export type Environment = {
     image: string;
     status: string;
     container_id: string;
+    cloud_status: string;
+    cloud_region: string;
+    instance_id: string;
+    public_ip: string;
+    terraform_dir: string;
+    cloud_error: string;
     created_at: string;
     updated_at: string;
+};
+
+export type ProvisionRequest = {
+    region: string;
+    instance_type: string;
+    ami: string;
+    key_name: string;
 };
 
 type EnvironmentsResponse = {
@@ -138,5 +151,13 @@ export async function deleteEnvironment(id: string): Promise<void> {
     await request<unknown>(`/api/v1/environments/${id}`, {
         method: "DELETE",
         headers: withAuthHeaders(),
+    });
+}
+
+export async function provisionEnvironment(id: string, payload: ProvisionRequest): Promise<Environment> {
+    return request<Environment>(`/api/v1/environments/${id}/provision`, {
+        method: "POST",
+        headers: withAuthHeaders(),
+        body: JSON.stringify(payload),
     });
 }

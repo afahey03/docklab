@@ -17,9 +17,14 @@ const (
 	DefaultEnvironmentImage = "alpine:3.20"
 	statusRunning           = "running"
 	statusStopped           = "stopped"
+	cloudNotProvisioned     = "not_provisioned"
+	cloudProvisioning       = "provisioning"
+	cloudProvisioned        = "provisioned"
+	cloudProvisionFailed    = "provision_failed"
 )
 
 var ErrDockerUnavailable = errors.New("docker CLI is not installed or unavailable")
+var ErrProvisionInProgress = errors.New("provisioning is already in progress for this environment")
 
 type ContainerRuntime interface {
 	CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error)
@@ -76,14 +81,16 @@ func (d *DockerCLIRuntime) DeleteWorkspace(ctx context.Context, containerID stri
 }
 
 type EnvironmentService struct {
-	repo    repositories.EnvironmentRepository
-	runtime ContainerRuntime
+	repo            repositories.EnvironmentRepository
+	runtime         ContainerRuntime
+	terraformRunner TerraformRunner
 }
 
 func NewEnvironmentService(repo repositories.EnvironmentRepository, runtime ContainerRuntime) *EnvironmentService {
 	return &EnvironmentService{
-		repo:    repo,
-		runtime: runtime,
+		repo:            repo,
+		runtime:         runtime,
+		terraformRunner: NewTerraformCLIRunner(),
 	}
 }
 
@@ -148,11 +155,78 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 		return err
 	}
 
+	if shouldDestroyCloudResources(env) {
+		destroyCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		err = s.terraformRunner.DestroyEC2(destroyCtx, env.TerraformDir)
+		cancel()
+		if err != nil {
+			_, _ = s.repo.UpdateProvisioning(
+				ctx,
+				env.ID,
+				userEmail,
+				cloudProvisionFailed,
+				env.CloudRegion,
+				env.InstanceID,
+				env.PublicIP,
+				env.TerraformDir,
+				fmt.Sprintf("destroy failed: %v", err),
+			)
+			return err
+		}
+	}
+
 	if err := s.runtime.DeleteWorkspace(ctx, env.ContainerID); err != nil {
 		return err
 	}
 
 	return s.repo.Delete(ctx, id, userEmail)
+}
+
+func shouldDestroyCloudResources(env *models.Environment) bool {
+	if env == nil {
+		return false
+	}
+
+	return env.CloudStatus == cloudProvisioned || env.InstanceID != "" || env.TerraformDir != ""
+}
+
+func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userEmail string, req ProvisionRequest) (*models.Environment, error) {
+	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if env.CloudStatus == cloudProvisioning {
+		return nil, ErrProvisionInProgress
+	}
+
+	_, err = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisioning, req.Region, "", "", env.TerraformDir, "")
+	if err != nil {
+		return nil, err
+	}
+
+	provisionCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
+	result, err := s.terraformRunner.ProvisionEC2(provisionCtx, env.ID, req, env.TerraformDir)
+	if err != nil {
+		failedTerraformDir := env.TerraformDir
+		var workspaceErr *TerraformWorkspaceError
+		if errors.As(err, &workspaceErr) && workspaceErr.TerraformDir != "" {
+			failedTerraformDir = workspaceErr.TerraformDir
+		}
+
+		failedEnv, updateErr := s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisionFailed, req.Region, "", "", failedTerraformDir, err.Error())
+		if updateErr == nil {
+			return failedEnv, nil
+		}
+		return nil, err
+	}
+
+	return s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisioned, req.Region, result.InstanceID, result.PublicIP, result.TerraformDir, "")
+}
+
+func (s *EnvironmentService) GetEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
+	return s.repo.GetByIDForUser(ctx, id, userEmail)
 }
 
 func generateEnvironmentName(userEmail string) string {

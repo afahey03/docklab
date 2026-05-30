@@ -9,9 +9,9 @@ React Frontend
     ↓
 Go API Server
     ↓
-Terraform Runner Service (planned)
+Terraform Runner Service
     ↓
-AWS EC2 Instance (planned)
+AWS EC2 Instance
     ↓
 Docker Workspace Container
     ↓
@@ -42,6 +42,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - JWT auth (`/api/v1/auth/register`, `/api/v1/auth/login`, protected `/api/v1/auth/me`)
 - Password hashing with bcrypt
 - Environment lifecycle APIs (`/api/v1/environments`, start/stop/delete actions)
+- Terraform provisioning API (`/api/v1/environments/:id/provision`)
 - Local Docker workspace lifecycle via backend service
 - PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)
@@ -84,13 +85,14 @@ Frontend runs at `http://localhost:5173`.
 6. After login, you will be redirected to `/dashboard`.
 7. Use the dashboard to create and manage local Docker environments.
 8. Open Terminal on a running environment to run shell commands from the browser.
+9. Use Provision on an environment to trigger Terraform-based EC2 provisioning.
 
 Terminal tips:
 - Copy selected terminal text with `Ctrl+Shift+C`.
 - Paste with `Ctrl+Shift+V`.
 - Use `Reconnect` in the terminal panel if the socket drops.
 
-Current available product flow includes authentication, local environment lifecycle management, and browser terminal access.
+Current available product flow includes authentication, local environment lifecycle management, browser terminal access, and Terraform-based EC2 provisioning.
 
 ### 3) Environment configuration
 
@@ -107,6 +109,10 @@ Used variables:
 - `DATABASE_URL`
 - `JWT_SECRET`
 - `JWT_TTL_MINUTES`
+- `AWS_ACCESS_KEY_ID` (required for Terraform provisioning)
+- `AWS_SECRET_ACCESS_KEY` (required for Terraform provisioning)
+- `AWS_SESSION_TOKEN` (optional, if using temporary credentials)
+- `AWS_DEFAULT_REGION` (optional, default `us-east-1`)
 
 ## Validation commands
 

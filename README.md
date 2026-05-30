@@ -45,6 +45,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Terraform provisioning API (`/api/v1/environments/:id/provision`)
 - Terraform cloud-termination API (`/api/v1/environments/:id/destroy-cloud`)
 - Async operation status API (`/api/v1/operations/:id`)
+- Postgres-persisted operation tracking for async cloud workflows
 - Local Docker workspace lifecycle via backend service
 - PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)
@@ -91,6 +92,7 @@ Frontend runs at `http://localhost:5173`.
 10. Use Terminate EC2 to destroy cloud resources while keeping the environment.
 11. Use Delete to remove both the environment and provisioned cloud resources.
 12. Long-running cloud actions run asynchronously; the dashboard tracks progress until completion.
+13. Operation status is persisted in PostgreSQL, so polling state survives backend restarts.
 
 Terminal tips:
 - Copy selected terminal text with `Ctrl+Shift+C`.

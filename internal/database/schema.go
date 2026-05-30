@@ -72,5 +72,33 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to ensure environments columns: %w", err)
 	}
 
+	const operationsTable = `
+		CREATE TABLE IF NOT EXISTS operations (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+			environment_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_operations_user_email ON operations(user_email);
+		CREATE INDEX IF NOT EXISTS idx_operations_environment_status ON operations(environment_id, status);
+	`
+
+	if _, err := pool.Exec(ctx, operationsTable); err != nil {
+		return fmt.Errorf("failed to create operations table: %w", err)
+	}
+
+	const operationsColumns = `
+		ALTER TABLE operations ADD COLUMN IF NOT EXISTS error TEXT NOT NULL DEFAULT '';
+	`
+
+	if _, err := pool.Exec(ctx, operationsColumns); err != nil {
+		return fmt.Errorf("failed to ensure operations columns: %w", err)
+	}
+
 	return nil
 }

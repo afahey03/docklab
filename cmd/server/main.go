@@ -38,8 +38,9 @@ func main() {
 
 	userRepo := repositories.NewPostgresUserRepository(dbPool)
 	environmentRepo := repositories.NewPostgresEnvironmentRepository(dbPool)
+	operationRepo := repositories.NewPostgresOperationRepository(dbPool)
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
-	environmentService := services.NewEnvironmentService(environmentRepo, services.NewDockerCLIRuntime())
+	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, services.NewDockerCLIRuntime())
 	terminalService := services.NewTerminalService(environmentRepo)
 	authHandler := handlers.NewAuthHandler(authService)
 	environmentHandler := handlers.NewEnvironmentHandler(environmentService)

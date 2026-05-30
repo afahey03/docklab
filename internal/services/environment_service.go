@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/afahey03/docklab/internal/models"
@@ -93,18 +92,17 @@ func (d *DockerCLIRuntime) DeleteWorkspace(ctx context.Context, containerID stri
 
 type EnvironmentService struct {
 	repo            repositories.EnvironmentRepository
+	operationRepo   repositories.OperationRepository
 	runtime         ContainerRuntime
 	terraformRunner TerraformRunner
-	operationsMu    sync.RWMutex
-	operations      map[string]*models.Operation
 }
 
-func NewEnvironmentService(repo repositories.EnvironmentRepository, runtime ContainerRuntime) *EnvironmentService {
+func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRepo repositories.OperationRepository, runtime ContainerRuntime) *EnvironmentService {
 	return &EnvironmentService{
 		repo:            repo,
+		operationRepo:   operationRepo,
 		runtime:         runtime,
 		terraformRunner: NewTerraformCLIRunner(),
-		operations:      make(map[string]*models.Operation),
 	}
 }
 
@@ -116,14 +114,18 @@ func (s *EnvironmentService) QueueProvisionEnvironment(ctx context.Context, id, 
 	if env.CloudStatus == cloudProvisioning {
 		return nil, ErrProvisionInProgress
 	}
-	if s.hasInProgressOperation(env.ID, userEmail) {
+	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if hasInProgress {
 		return nil, ErrOperationInProgress
 	}
 
-	return s.queueOperation(userEmail, env.ID, opTypeProvision, func() error {
+	return s.queueOperation(ctx, userEmail, env.ID, opTypeProvision, func() error {
 		_, provisionErr := s.ProvisionEnvironment(context.Background(), env.ID, userEmail, req)
 		return provisionErr
-	}), nil
+	})
 }
 
 func (s *EnvironmentService) QueueDestroyCloudEnvironment(ctx context.Context, id, userEmail string) (*models.Operation, error) {
@@ -131,17 +133,21 @@ func (s *EnvironmentService) QueueDestroyCloudEnvironment(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
-	if s.hasInProgressOperation(env.ID, userEmail) {
+	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if hasInProgress {
 		return nil, ErrOperationInProgress
 	}
 	if shouldDestroyCloudResources(env) {
 		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.InstanceID, env.PublicIP, env.TerraformDir, "")
 	}
 
-	return s.queueOperation(userEmail, env.ID, opTypeDestroyCloud, func() error {
+	return s.queueOperation(ctx, userEmail, env.ID, opTypeDestroyCloud, func() error {
 		_, destroyErr := s.DestroyCloudEnvironment(context.Background(), env.ID, userEmail)
 		return destroyErr
-	}), nil
+	})
 }
 
 func (s *EnvironmentService) QueueDeleteEnvironment(ctx context.Context, id, userEmail string) (*models.Operation, error) {
@@ -149,29 +155,32 @@ func (s *EnvironmentService) QueueDeleteEnvironment(ctx context.Context, id, use
 	if err != nil {
 		return nil, err
 	}
-	if s.hasInProgressOperation(env.ID, userEmail) {
+	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if hasInProgress {
 		return nil, ErrOperationInProgress
 	}
 	if shouldDestroyCloudResources(env) {
 		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.InstanceID, env.PublicIP, env.TerraformDir, "")
 	}
 
-	return s.queueOperation(userEmail, env.ID, opTypeDeleteEnvironment, func() error {
+	return s.queueOperation(ctx, userEmail, env.ID, opTypeDeleteEnvironment, func() error {
 		return s.DeleteEnvironment(context.Background(), env.ID, userEmail)
-	}), nil
+	})
 }
 
-func (s *EnvironmentService) GetOperation(_ context.Context, operationID, userEmail string) (*models.Operation, error) {
-	s.operationsMu.RLock()
-	defer s.operationsMu.RUnlock()
-
-	op, ok := s.operations[operationID]
-	if !ok || op.UserEmail != userEmail {
+func (s *EnvironmentService) GetOperation(ctx context.Context, operationID, userEmail string) (*models.Operation, error) {
+	op, err := s.operationRepo.GetByIDForUser(ctx, operationID, userEmail)
+	if errors.Is(err, repositories.ErrOperationNotFound) {
 		return nil, ErrOperationNotFound
 	}
+	if err != nil {
+		return nil, err
+	}
 
-	copy := *op
-	return &copy, nil
+	return op, nil
 }
 
 func (s *EnvironmentService) CreateEnvironment(ctx context.Context, userEmail, name, image string) (*models.Environment, error) {
@@ -332,64 +341,27 @@ func (s *EnvironmentService) GetEnvironment(ctx context.Context, id, userEmail s
 	return s.repo.GetByIDForUser(ctx, id, userEmail)
 }
 
-func (s *EnvironmentService) queueOperation(userEmail, environmentID, operationType string, job func() error) *models.Operation {
-	now := time.Now().UTC()
-	op := &models.Operation{
-		ID:            fmt.Sprintf("op-%d-%d", now.UnixNano(), rand.Int63()),
-		UserEmail:     userEmail,
-		EnvironmentID: environmentID,
-		Type:          operationType,
-		Status:        opStatusQueued,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+func (s *EnvironmentService) queueOperation(ctx context.Context, userEmail, environmentID, operationType string, job func() error) (*models.Operation, error) {
+	op, err := s.operationRepo.Create(ctx, userEmail, environmentID, operationType, opStatusQueued, "")
+	if err != nil {
+		return nil, err
 	}
-
-	s.operationsMu.Lock()
-	s.operations[op.ID] = op
-	s.operationsMu.Unlock()
 
 	go func(operationID string) {
-		s.updateOperation(operationID, opStatusRunning, "")
+		_, _ = s.operationRepo.UpdateStatus(context.Background(), operationID, userEmail, opStatusRunning, "")
 		err := job()
 		if err != nil {
-			s.updateOperation(operationID, opStatusFailed, err.Error())
+			_, _ = s.operationRepo.UpdateStatus(context.Background(), operationID, userEmail, opStatusFailed, err.Error())
 			return
 		}
-		s.updateOperation(operationID, opStatusSucceeded, "")
+		_, _ = s.operationRepo.UpdateStatus(context.Background(), operationID, userEmail, opStatusSucceeded, "")
 	}(op.ID)
 
-	copy := *op
-	return &copy
+	return op, nil
 }
 
-func (s *EnvironmentService) hasInProgressOperation(environmentID, userEmail string) bool {
-	s.operationsMu.RLock()
-	defer s.operationsMu.RUnlock()
-
-	for _, op := range s.operations {
-		if op.EnvironmentID != environmentID || op.UserEmail != userEmail {
-			continue
-		}
-		if op.Status == opStatusQueued || op.Status == opStatusRunning {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (s *EnvironmentService) updateOperation(operationID, status, errMsg string) {
-	s.operationsMu.Lock()
-	defer s.operationsMu.Unlock()
-
-	op, ok := s.operations[operationID]
-	if !ok {
-		return
-	}
-
-	op.Status = status
-	op.Error = errMsg
-	op.UpdatedAt = time.Now().UTC()
+func (s *EnvironmentService) hasInProgressOperation(ctx context.Context, environmentID, userEmail string) (bool, error) {
+	return s.operationRepo.ExistsInProgressForEnvironment(ctx, environmentID, userEmail)
 }
 
 func generateEnvironmentName(userEmail string) string {

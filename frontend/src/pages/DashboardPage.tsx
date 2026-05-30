@@ -675,7 +675,7 @@ export function DashboardPage() {
                                                 {isEnvironmentActionPending(env.id, "stop") ? "Stopping..." : "Stop"}
                                             </button>
                                             <button
-                                                className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950"
+                                                className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                 type="button"
                                                 disabled={isEnvironmentPending(env.id)}
                                                 onClick={() => promptDeleteEnvironment(env.id)}

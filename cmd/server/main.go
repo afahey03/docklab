@@ -77,6 +77,7 @@ func main() {
 	protected.POST("/environments/:id/start", environmentHandler.Start)
 	protected.POST("/environments/:id/stop", environmentHandler.Stop)
 	protected.POST("/environments/:id/provision", environmentHandler.Provision)
+	protected.POST("/environments/:id/destroy-cloud", environmentHandler.DestroyCloud)
 	protected.DELETE("/environments/:id", environmentHandler.Delete)
 
 	server := &http.Server{

@@ -127,6 +127,18 @@ func (h *EnvironmentHandler) Delete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (h *EnvironmentHandler) DestroyCloud(c *gin.Context) {
+	id := c.Param("id")
+	userEmail := c.GetString("user_email")
+	env, err := h.environmentService.DestroyCloudEnvironment(c.Request.Context(), id, userEmail)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, env)
+}
+
 func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	if errors.Is(err, repositories.ErrEnvironmentNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "environment not found"})

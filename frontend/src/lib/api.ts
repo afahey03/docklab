@@ -161,3 +161,10 @@ export async function provisionEnvironment(id: string, payload: ProvisionRequest
         body: JSON.stringify(payload),
     });
 }
+
+export async function destroyCloudEnvironment(id: string): Promise<Environment> {
+    return request<Environment>(`/api/v1/environments/${id}/destroy-cloud`, {
+        method: "POST",
+        headers: withAuthHeaders(),
+    });
+}

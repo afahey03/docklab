@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import {
     createEnvironment,
+    destroyCloudEnvironment,
     deleteEnvironment,
     getEnvironments,
     getMe,
@@ -15,7 +16,18 @@ import {
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
 
-type EnvironmentAction = "start" | "stop" | "delete" | "provision";
+type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud";
+type ConfirmAction = "delete_environment" | "destroy_cloud";
+
+type ConfirmDialogState = {
+    open: boolean;
+    environmentId: string;
+    title: string;
+    description: string;
+    confirmLabel: string;
+    action: ConfirmAction;
+    destructive?: boolean;
+};
 
 export function DashboardPage() {
     const navigate = useNavigate();
@@ -28,8 +40,18 @@ export function DashboardPage() {
     const [amiID, setAMIID] = useState("ami-0c2b8ca1dad447f8a");
     const [keyName, setKeyName] = useState("");
     const [error, setError] = useState("");
+    const [notice, setNotice] = useState("");
+    const [isLoadingEnvironments, setIsLoadingEnvironments] = useState(true);
     const [isCreating, setIsCreating] = useState(false);
     const [pendingActions, setPendingActions] = useState<Record<string, EnvironmentAction | undefined>>({});
+    const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>({
+        open: false,
+        environmentId: "",
+        title: "",
+        description: "",
+        confirmLabel: "Confirm",
+        action: "delete_environment",
+    });
     const [activeTerminalEnvironmentId, setActiveTerminalEnvironmentId] = useState("");
     const [terminalConnected, setTerminalConnected] = useState(false);
     const terminalContainerRef = useRef<HTMLDivElement | null>(null);
@@ -139,6 +161,8 @@ export function DashboardPage() {
             } catch {
                 clearToken();
                 navigate("/login", { replace: true });
+            } finally {
+                setIsLoadingEnvironments(false);
             }
         }
 
@@ -272,6 +296,10 @@ export function DashboardPage() {
         setEnvironments(envs);
     }
 
+    function replaceEnvironment(updated: Environment) {
+        setEnvironments((previous) => previous.map((item) => (item.id === updated.id ? updated : item)));
+    }
+
     function setEnvironmentPendingAction(id: string, action?: EnvironmentAction) {
         setPendingActions((previous) => {
             const next = { ...previous };
@@ -294,11 +322,21 @@ export function DashboardPage() {
 
     async function handleCreateEnvironment() {
         setError("");
+        setNotice("");
+        const trimmedName = name.trim();
+        const trimmedImage = image.trim();
+
+        if (!trimmedImage) {
+            setError("docker image is required");
+            return;
+        }
+
         setIsCreating(true);
         try {
-            await createEnvironment(name, image);
+            const created = await createEnvironment(trimmedName, trimmedImage);
+            setEnvironments((previous) => [created, ...previous]);
             setName("");
-            await refreshEnvironments();
+            setNotice("environment created");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to create environment");
         } finally {
@@ -308,10 +346,12 @@ export function DashboardPage() {
 
     async function handleStartEnvironment(id: string) {
         setError("");
+        setNotice("");
         setEnvironmentPendingAction(id, "start");
         try {
-            await startEnvironment(id);
-            await refreshEnvironments();
+            const updated = await startEnvironment(id);
+            replaceEnvironment(updated);
+            setNotice("environment started");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to start environment");
         } finally {
@@ -321,10 +361,12 @@ export function DashboardPage() {
 
     async function handleStopEnvironment(id: string) {
         setError("");
+        setNotice("");
         setEnvironmentPendingAction(id, "stop");
         try {
-            await stopEnvironment(id);
-            await refreshEnvironments();
+            const updated = await stopEnvironment(id);
+            replaceEnvironment(updated);
+            setNotice("environment stopped");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to stop environment");
         } finally {
@@ -332,23 +374,58 @@ export function DashboardPage() {
         }
     }
 
-    async function handleDeleteEnvironment(id: string) {
+    function promptDeleteEnvironment(id: string) {
+        const env = environments.find((item) => item.id === id);
+        if (!env) {
+            return;
+        }
+
+        const hasCloudResources = Boolean(env.instance_id || env.terraform_dir || env.cloud_status === "provisioned");
+        setConfirmDialog({
+            open: true,
+            environmentId: id,
+            title: hasCloudResources ? "Delete Environment And Cloud Resources" : "Delete Environment",
+            description: hasCloudResources
+                ? "This will terminate provisioned EC2 infrastructure and remove the environment from DockLab."
+                : "This will remove the environment from DockLab.",
+            confirmLabel: "Delete",
+            action: "delete_environment",
+            destructive: true,
+        });
+    }
+
+    function promptDestroyCloudEnvironment(id: string) {
+        const env = environments.find((item) => item.id === id);
+        if (!env) {
+            return;
+        }
+
+        setConfirmDialog({
+            open: true,
+            environmentId: id,
+            title: "Terminate Cloud Resources",
+            description: "This will terminate the provisioned EC2 resources and keep the environment in DockLab.",
+            confirmLabel: "Terminate EC2",
+            action: "destroy_cloud",
+            destructive: true,
+        });
+    }
+
+    function closeConfirmDialog() {
+        setConfirmDialog((previous) => ({ ...previous, open: false }));
+    }
+
+    async function runDeleteEnvironment(id: string) {
         setError("");
+        setNotice("");
         setEnvironmentPendingAction(id, "delete");
         try {
-            const env = environments.find((item) => item.id === id);
-            const hasCloudResources = Boolean(env?.instance_id || env?.terraform_dir || env?.cloud_status === "provisioned");
-            const confirmed = window.confirm(
-                hasCloudResources
-                    ? "Delete this environment and terminate its provisioned EC2 infrastructure?"
-                    : "Delete this environment?",
-            );
-            if (!confirmed) {
-                return;
-            }
-
             await deleteEnvironment(id);
-            await refreshEnvironments();
+            if (activeTerminalEnvironmentId === id) {
+                closeTerminal();
+            }
+            setEnvironments((previous) => previous.filter((item) => item.id !== id));
+            setNotice("environment deleted");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to delete environment");
         } finally {
@@ -356,17 +433,64 @@ export function DashboardPage() {
         }
     }
 
+    async function runDestroyCloudEnvironment(id: string) {
+        setError("");
+        setNotice("");
+        setEnvironmentPendingAction(id, "destroy_cloud");
+        try {
+            const updated = await destroyCloudEnvironment(id);
+            replaceEnvironment(updated);
+            setNotice("cloud resources terminated");
+        } catch (requestError) {
+            setError(requestError instanceof Error ? requestError.message : "failed to terminate cloud resources");
+        } finally {
+            setEnvironmentPendingAction(id);
+        }
+    }
+
+    async function handleConfirmAction() {
+        const { environmentId, action } = confirmDialog;
+        closeConfirmDialog();
+        if (!environmentId) {
+            return;
+        }
+
+        if (action === "destroy_cloud") {
+            await runDestroyCloudEnvironment(environmentId);
+            return;
+        }
+
+        await runDeleteEnvironment(environmentId);
+    }
+
     async function handleProvisionEnvironment(id: string) {
         setError("");
+        setNotice("");
+
+        if (!awsRegion.trim()) {
+            setError("aws region is required");
+            return;
+        }
+        if (!instanceType.trim()) {
+            setError("instance type is required");
+            return;
+        }
+        if (!amiID.trim()) {
+            setError("AMI ID is required");
+            return;
+        }
+
         setEnvironmentPendingAction(id, "provision");
         try {
-            await provisionEnvironment(id, {
+            const updated = await provisionEnvironment(id, {
                 region: awsRegion.trim(),
                 instance_type: instanceType.trim(),
                 ami: amiID.trim(),
                 key_name: keyName.trim(),
             });
+            replaceEnvironment(updated);
             await refreshEnvironments();
+            setNotice("provisioning finished");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to provision environment");
         } finally {
@@ -375,7 +499,8 @@ export function DashboardPage() {
     }
 
     return (
-        <main className="min-h-screen bg-slate-950 text-slate-100">
+        <>
+            <main className="min-h-screen bg-slate-950 text-slate-100">
             <div className="mx-auto grid max-w-6xl gap-6 p-6 md:grid-cols-[240px_1fr]">
                 <aside className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                     <h2 className="text-lg font-semibold">DockLab</h2>
@@ -414,12 +539,14 @@ export function DashboardPage() {
                                 placeholder="Environment name (optional)"
                                 value={name}
                                 onChange={(event) => setName(event.target.value)}
+                                maxLength={64}
                             />
                             <input
                                 className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
                                 placeholder="Docker image"
                                 value={image}
                                 onChange={(event) => setImage(event.target.value)}
+                                maxLength={128}
                             />
                             <button
                                 className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
@@ -430,6 +557,7 @@ export function DashboardPage() {
                                 {isCreating ? "Working..." : "Create"}
                             </button>
                         </div>
+                        {notice ? <p className="mt-3 text-sm text-emerald-400">{notice}</p> : null}
                         {error ? <p className="mt-3 text-sm text-rose-400">{error}</p> : null}
                     </article>
 
@@ -445,31 +573,37 @@ export function DashboardPage() {
                                 placeholder="AWS region"
                                 value={awsRegion}
                                 onChange={(event) => setAWSRegion(event.target.value)}
+                                maxLength={32}
                             />
                             <input
                                 className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
                                 placeholder="Instance type"
                                 value={instanceType}
                                 onChange={(event) => setInstanceType(event.target.value)}
+                                maxLength={32}
                             />
                             <input
                                 className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
                                 placeholder="AMI ID"
                                 value={amiID}
                                 onChange={(event) => setAMIID(event.target.value)}
+                                maxLength={32}
                             />
                             <input
                                 className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
                                 placeholder="EC2 key pair name (optional)"
                                 value={keyName}
                                 onChange={(event) => setKeyName(event.target.value)}
+                                maxLength={64}
                             />
                         </div>
                     </article>
 
                     <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                         <h3 className="font-medium">Your environments</h3>
-                        {environments.length === 0 ? (
+                        {isLoadingEnvironments ? (
+                            <p className="mt-1 text-sm text-slate-400">Loading environments...</p>
+                        ) : environments.length === 0 ? (
                             <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
                         ) : (
                             <div className="mt-3 space-y-3">
@@ -516,9 +650,20 @@ export function DashboardPage() {
                                                 className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950"
                                                 type="button"
                                                 disabled={isEnvironmentPending(env.id)}
-                                                onClick={() => handleDeleteEnvironment(env.id)}
+                                                onClick={() => promptDeleteEnvironment(env.id)}
                                             >
                                                 {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
+                                            </button>
+                                            <button
+                                                className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                type="button"
+                                                disabled={
+                                                    isEnvironmentPending(env.id)
+                                                    || (!env.instance_id && !env.terraform_dir && env.cloud_status !== "provisioned")
+                                                }
+                                                onClick={() => promptDestroyCloudEnvironment(env.id)}
+                                            >
+                                                {isEnvironmentActionPending(env.id, "destroy_cloud") ? "Terminating..." : "Terminate EC2"}
                                             </button>
                                             <button
                                                 className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
@@ -587,6 +732,32 @@ export function DashboardPage() {
                     </article>
                 </section>
             </div>
-        </main>
+            </main>
+
+            {confirmDialog.open ? (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 px-4">
+                <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+                    <h3 className="text-lg font-semibold text-slate-100">{confirmDialog.title}</h3>
+                    <p className="mt-2 text-sm text-slate-300">{confirmDialog.description}</p>
+                    <div className="mt-5 flex justify-end gap-2">
+                        <button
+                            className="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
+                            type="button"
+                            onClick={closeConfirmDialog}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            className="rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-rose-50 hover:bg-rose-500"
+                            type="button"
+                            onClick={() => void handleConfirmAction()}
+                        >
+                            {confirmDialog.confirmLabel}
+                        </button>
+                    </div>
+                </div>
+            </div>
+            ) : null}
+        </>
     );
 }

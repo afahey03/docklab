@@ -138,8 +138,16 @@ func (r *TerraformCLIRunner) DestroyEC2(ctx context.Context, terraformDir string
 		return fmt.Errorf("terraform state path is not a directory: %s", terraformDir)
 	}
 
+	if err := runTerraform(ctx, terraformDir, "init", "-input=false", "-no-color"); err != nil {
+		return err
+	}
+
 	if err := runTerraform(ctx, terraformDir, "destroy", "-auto-approve", "-input=false", "-no-color"); err != nil {
 		return err
+	}
+
+	if err := os.RemoveAll(terraformDir); err != nil {
+		return fmt.Errorf("failed to remove terraform workspace: %w", err)
 	}
 
 	return nil

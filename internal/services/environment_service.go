@@ -155,24 +155,8 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 		return err
 	}
 
-	if shouldDestroyCloudResources(env) {
-		destroyCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-		err = s.terraformRunner.DestroyEC2(destroyCtx, env.TerraformDir)
-		cancel()
-		if err != nil {
-			_, _ = s.repo.UpdateProvisioning(
-				ctx,
-				env.ID,
-				userEmail,
-				cloudProvisionFailed,
-				env.CloudRegion,
-				env.InstanceID,
-				env.PublicIP,
-				env.TerraformDir,
-				fmt.Sprintf("destroy failed: %v", err),
-			)
-			return err
-		}
+	if err := s.destroyCloudResources(ctx, env, userEmail); err != nil {
+		return err
 	}
 
 	if err := s.runtime.DeleteWorkspace(ctx, env.ContainerID); err != nil {
@@ -182,12 +166,51 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 	return s.repo.Delete(ctx, id, userEmail)
 }
 
+func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
+	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.destroyCloudResources(ctx, env, userEmail); err != nil {
+		return nil, err
+	}
+
+	return s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudNotProvisioned, "", "", "", "", "")
+}
+
 func shouldDestroyCloudResources(env *models.Environment) bool {
 	if env == nil {
 		return false
 	}
 
 	return env.CloudStatus == cloudProvisioned || env.InstanceID != "" || env.TerraformDir != ""
+}
+
+func (s *EnvironmentService) destroyCloudResources(ctx context.Context, env *models.Environment, userEmail string) error {
+	if !shouldDestroyCloudResources(env) {
+		return nil
+	}
+
+	destroyCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	err := s.terraformRunner.DestroyEC2(destroyCtx, env.TerraformDir)
+	cancel()
+	if err != nil {
+		_, _ = s.repo.UpdateProvisioning(
+			ctx,
+			env.ID,
+			userEmail,
+			cloudProvisionFailed,
+			env.CloudRegion,
+			env.InstanceID,
+			env.PublicIP,
+			env.TerraformDir,
+			fmt.Sprintf("destroy failed: %v", err),
+		)
+		return err
+	}
+
+	return nil
 }
 
 func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userEmail string, req ProvisionRequest) (*models.Environment, error) {

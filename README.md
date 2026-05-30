@@ -43,6 +43,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Password hashing with bcrypt
 - Environment lifecycle APIs (`/api/v1/environments`, start/stop/delete actions)
 - Terraform provisioning API (`/api/v1/environments/:id/provision`)
+- Terraform cloud-termination API (`/api/v1/environments/:id/destroy-cloud`)
 - Local Docker workspace lifecycle via backend service
 - PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)
@@ -86,6 +87,8 @@ Frontend runs at `http://localhost:5173`.
 7. Use the dashboard to create and manage local Docker environments.
 8. Open Terminal on a running environment to run shell commands from the browser.
 9. Use Provision on an environment to trigger Terraform-based EC2 provisioning.
+10. Use Terminate EC2 to destroy cloud resources while keeping the environment.
+11. Use Delete to remove both the environment and provisioned cloud resources.
 
 Terminal tips:
 - Copy selected terminal text with `Ctrl+Shift+C`.
@@ -93,6 +96,8 @@ Terminal tips:
 - Use `Reconnect` in the terminal panel if the socket drops.
 
 Current available product flow includes authentication, local environment lifecycle management, browser terminal access, and Terraform-based EC2 provisioning.
+
+Destructive actions are confirmed through in-app modal dialogs rather than browser alerts.
 
 ### 3) Environment configuration
 

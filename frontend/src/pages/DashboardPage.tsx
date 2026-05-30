@@ -9,10 +9,12 @@ import {
     deleteEnvironment,
     getEnvironments,
     getMe,
+    getOperation,
     provisionEnvironment,
     startEnvironment,
     stopEnvironment,
     type Environment,
+    type Operation,
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
 
@@ -28,6 +30,9 @@ type ConfirmDialogState = {
     action: ConfirmAction;
     destructive?: boolean;
 };
+
+const OPERATION_POLL_INTERVAL_MS = 2000;
+const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
 
 export function DashboardPage() {
     const navigate = useNavigate();
@@ -312,6 +317,33 @@ export function DashboardPage() {
         });
     }
 
+    function sleep(ms: number) {
+        return new Promise((resolve) => {
+            window.setTimeout(resolve, ms);
+        });
+    }
+
+    async function waitForOperation(operation: Operation, successMessage: string) {
+        const started = Date.now();
+
+        while (Date.now() - started < OPERATION_TIMEOUT_MS) {
+            const latest = await getOperation(operation.id);
+            if (latest.status === "succeeded") {
+                await refreshEnvironments();
+                setNotice(successMessage);
+                return;
+            }
+            if (latest.status === "failed") {
+                await refreshEnvironments();
+                throw new Error(latest.error || "operation failed");
+            }
+
+            await sleep(OPERATION_POLL_INTERVAL_MS);
+        }
+
+        throw new Error("operation timed out while waiting for completion");
+    }
+
     function isEnvironmentPending(id: string) {
         return Boolean(pendingActions[id]);
     }
@@ -420,12 +452,11 @@ export function DashboardPage() {
         setNotice("");
         setEnvironmentPendingAction(id, "delete");
         try {
-            await deleteEnvironment(id);
+            const operation = await deleteEnvironment(id);
+            await waitForOperation(operation, "environment deleted");
             if (activeTerminalEnvironmentId === id) {
                 closeTerminal();
             }
-            setEnvironments((previous) => previous.filter((item) => item.id !== id));
-            setNotice("environment deleted");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to delete environment");
         } finally {
@@ -438,9 +469,8 @@ export function DashboardPage() {
         setNotice("");
         setEnvironmentPendingAction(id, "destroy_cloud");
         try {
-            const updated = await destroyCloudEnvironment(id);
-            replaceEnvironment(updated);
-            setNotice("cloud resources terminated");
+            const operation = await destroyCloudEnvironment(id);
+            await waitForOperation(operation, "cloud resources terminated");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to terminate cloud resources");
         } finally {
@@ -482,15 +512,13 @@ export function DashboardPage() {
 
         setEnvironmentPendingAction(id, "provision");
         try {
-            const updated = await provisionEnvironment(id, {
+            const operation = await provisionEnvironment(id, {
                 region: awsRegion.trim(),
                 instance_type: instanceType.trim(),
                 ami: amiID.trim(),
                 key_name: keyName.trim(),
             });
-            replaceEnvironment(updated);
-            await refreshEnvironments();
-            setNotice("provisioning finished");
+            await waitForOperation(operation, "provisioning finished");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to provision environment");
         } finally {

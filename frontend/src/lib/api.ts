@@ -39,6 +39,17 @@ export type ProvisionRequest = {
     key_name: string;
 };
 
+export type Operation = {
+    id: string;
+    user_email: string;
+    environment_id: string;
+    type: string;
+    status: "queued" | "running" | "succeeded" | "failed";
+    error: string;
+    created_at: string;
+    updated_at: string;
+};
+
 type EnvironmentsResponse = {
     environments: Environment[];
 };
@@ -147,24 +158,31 @@ export async function stopEnvironment(id: string): Promise<Environment> {
     });
 }
 
-export async function deleteEnvironment(id: string): Promise<void> {
-    await request<unknown>(`/api/v1/environments/${id}`, {
+export async function deleteEnvironment(id: string): Promise<Operation> {
+    return request<Operation>(`/api/v1/environments/${id}`, {
         method: "DELETE",
         headers: withAuthHeaders(),
     });
 }
 
-export async function provisionEnvironment(id: string, payload: ProvisionRequest): Promise<Environment> {
-    return request<Environment>(`/api/v1/environments/${id}/provision`, {
+export async function provisionEnvironment(id: string, payload: ProvisionRequest): Promise<Operation> {
+    return request<Operation>(`/api/v1/environments/${id}/provision`, {
         method: "POST",
         headers: withAuthHeaders(),
         body: JSON.stringify(payload),
     });
 }
 
-export async function destroyCloudEnvironment(id: string): Promise<Environment> {
-    return request<Environment>(`/api/v1/environments/${id}/destroy-cloud`, {
+export async function destroyCloudEnvironment(id: string): Promise<Operation> {
+    return request<Operation>(`/api/v1/environments/${id}/destroy-cloud`, {
         method: "POST",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function getOperation(id: string): Promise<Operation> {
+    return request<Operation>(`/api/v1/operations/${id}`, {
+        method: "GET",
         headers: withAuthHeaders(),
     });
 }

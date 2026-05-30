@@ -78,7 +78,7 @@ func (h *EnvironmentHandler) Provision(c *gin.Context) {
 
 	id := c.Param("id")
 	userEmail := c.GetString("user_email")
-	env, err := h.environmentService.ProvisionEnvironment(c.Request.Context(), id, userEmail, services.ProvisionRequest{
+	op, err := h.environmentService.QueueProvisionEnvironment(c.Request.Context(), id, userEmail, services.ProvisionRequest{
 		Region:       req.Region,
 		InstanceType: req.InstanceType,
 		AMI:          req.AMI,
@@ -89,7 +89,7 @@ func (h *EnvironmentHandler) Provision(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, env)
+	c.JSON(http.StatusAccepted, op)
 }
 
 func (h *EnvironmentHandler) Start(c *gin.Context) {
@@ -119,24 +119,37 @@ func (h *EnvironmentHandler) Stop(c *gin.Context) {
 func (h *EnvironmentHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 	userEmail := c.GetString("user_email")
-	if err := h.environmentService.DeleteEnvironment(c.Request.Context(), id, userEmail); err != nil {
-		h.handleServiceError(c, err)
-		return
-	}
-
-	c.Status(http.StatusNoContent)
-}
-
-func (h *EnvironmentHandler) DestroyCloud(c *gin.Context) {
-	id := c.Param("id")
-	userEmail := c.GetString("user_email")
-	env, err := h.environmentService.DestroyCloudEnvironment(c.Request.Context(), id, userEmail)
+	op, err := h.environmentService.QueueDeleteEnvironment(c.Request.Context(), id, userEmail)
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, env)
+	c.JSON(http.StatusAccepted, op)
+}
+
+func (h *EnvironmentHandler) DestroyCloud(c *gin.Context) {
+	id := c.Param("id")
+	userEmail := c.GetString("user_email")
+	op, err := h.environmentService.QueueDestroyCloudEnvironment(c.Request.Context(), id, userEmail)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, op)
+}
+
+func (h *EnvironmentHandler) GetOperation(c *gin.Context) {
+	operationID := c.Param("id")
+	userEmail := c.GetString("user_email")
+	op, err := h.environmentService.GetOperation(c.Request.Context(), operationID, userEmail)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, op)
 }
 
 func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
@@ -154,6 +167,14 @@ func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	}
 	if errors.Is(err, services.ErrProvisionInProgress) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrOperationInProgress) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrOperationNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "operation not found"})
 		return
 	}
 

@@ -74,6 +74,7 @@ func main() {
 	protected.POST("/environments", environmentHandler.Create)
 	protected.GET("/environments", environmentHandler.List)
 	protected.GET("/environments/:id", environmentHandler.Get)
+	protected.GET("/operations/:id", environmentHandler.GetOperation)
 	protected.POST("/environments/:id/start", environmentHandler.Start)
 	protected.POST("/environments/:id/stop", environmentHandler.Stop)
 	protected.POST("/environments/:id/provision", environmentHandler.Provision)

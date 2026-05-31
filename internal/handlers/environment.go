@@ -170,6 +170,10 @@ func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "terraform_unavailable", Error: err.Error()})
 		return
 	}
+	if errors.Is(err, services.ErrTerraformStateBackendConfigMissing) {
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "terraform_state_config_missing", Error: err.Error()})
+		return
+	}
 	if errors.Is(err, services.ErrProvisionInProgress) {
 		c.JSON(http.StatusConflict, APIErrorResponse{Code: "provision_in_progress", Error: err.Error()})
 		return

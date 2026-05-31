@@ -12,6 +12,7 @@ import (
 )
 
 var ErrTerraformUnavailable = errors.New("terraform CLI is not installed or unavailable")
+var ErrTerraformStateBackendConfigMissing = errors.New("terraform state backend configuration is incomplete")
 
 type ProvisionRequest struct {
 	Region       string
@@ -28,13 +29,32 @@ type ProvisionResult struct {
 
 type TerraformRunner interface {
 	ProvisionEC2(ctx context.Context, environmentID string, req ProvisionRequest, existingTerraformDir string) (*ProvisionResult, error)
-	DestroyEC2(ctx context.Context, terraformDir string) error
+	DestroyEC2(ctx context.Context, environmentID, terraformDir string) error
 }
 
 type TerraformWorkspaceError struct {
 	TerraformDir string
 	Err          error
 }
+
+type terraformBackendConfig struct {
+	Bucket    string
+	Region    string
+	Table     string
+	KeyPrefix string
+	Key       string
+}
+
+type terraformBackendMarker struct {
+	Mode      string `json:"mode"`
+	Bucket    string `json:"bucket,omitempty"`
+	Region    string `json:"region,omitempty"`
+	Table     string `json:"table,omitempty"`
+	KeyPrefix string `json:"key_prefix,omitempty"`
+	Key       string `json:"key,omitempty"`
+}
+
+const terraformBackendMarkerFile = ".docklab-backend.json"
 
 func (e *TerraformWorkspaceError) Error() string {
 	if e == nil || e.Err == nil {
@@ -57,6 +77,11 @@ func NewTerraformCLIRunner() *TerraformCLIRunner {
 }
 
 func (r *TerraformCLIRunner) ProvisionEC2(ctx context.Context, environmentID string, req ProvisionRequest, existingTerraformDir string) (*ProvisionResult, error) {
+	backendConfig, err := loadTerraformBackendConfig(environmentID)
+	if err != nil {
+		return nil, &TerraformWorkspaceError{TerraformDir: existingTerraformDir, Err: err}
+	}
+
 	if req.Region == "" {
 		req.Region = "us-east-1"
 	}
@@ -83,6 +108,12 @@ func (r *TerraformCLIRunner) ProvisionEC2(ctx context.Context, environmentID str
 	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(terraformMainTemplate), 0o644); err != nil {
 		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform main.tf: %w", err)}
 	}
+	if err := os.WriteFile(filepath.Join(dir, "backend.tf"), []byte(terraformBackendTemplate), 0o644); err != nil {
+		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform backend.tf: %w", err)}
+	}
+	if err := writeTerraformBackendMarker(dir, backendConfig); err != nil {
+		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: err}
+	}
 
 	vars := map[string]string{
 		"aws_region":    req.Region,
@@ -98,7 +129,7 @@ func (r *TerraformCLIRunner) ProvisionEC2(ctx context.Context, environmentID str
 		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform tfvars: %w", err)}
 	}
 
-	if err := runTerraform(ctx, dir, "init", "-input=false", "-no-color"); err != nil {
+	if err := runTerraform(ctx, dir, terraformInitArgs(backendConfig)...); err != nil {
 		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: err}
 	}
 	if err := runTerraform(ctx, dir, "apply", "-auto-approve", "-input=false", "-no-color"); err != nil {
@@ -122,23 +153,34 @@ func (r *TerraformCLIRunner) ProvisionEC2(ctx context.Context, environmentID str
 	}, nil
 }
 
-func (r *TerraformCLIRunner) DestroyEC2(ctx context.Context, terraformDir string) error {
+func (r *TerraformCLIRunner) DestroyEC2(ctx context.Context, environmentID, terraformDir string) error {
 	if strings.TrimSpace(terraformDir) == "" {
-		return nil
+		var err error
+		terraformDir, err = os.MkdirTemp("", fmt.Sprintf("docklab-tf-%s-", environmentID))
+		if err != nil {
+			return fmt.Errorf("failed to create terraform workspace: %w", err)
+		}
 	}
 
 	info, err := os.Stat(terraformDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("terraform state directory not found: %s", terraformDir)
+			if err := os.MkdirAll(terraformDir, 0o755); err != nil {
+				return fmt.Errorf("failed to create terraform workspace: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to access terraform state directory: %w", err)
 		}
-		return fmt.Errorf("failed to access terraform state directory: %w", err)
-	}
-	if !info.IsDir() {
+	} else if !info.IsDir() {
 		return fmt.Errorf("terraform state path is not a directory: %s", terraformDir)
 	}
 
-	if err := runTerraform(ctx, terraformDir, "init", "-input=false", "-no-color"); err != nil {
+	_, initArgs, err := loadTerraformDestroyConfig(environmentID, terraformDir)
+	if err != nil {
+		return err
+	}
+
+	if err := runTerraform(ctx, terraformDir, initArgs...); err != nil {
 		return err
 	}
 
@@ -151,6 +193,108 @@ func (r *TerraformCLIRunner) DestroyEC2(ctx context.Context, terraformDir string
 	}
 
 	return nil
+}
+
+func terraformInitArgs(cfg terraformBackendConfig) []string {
+	args := []string{"init", "-input=false", "-no-color", "-reconfigure"}
+	args = append(args,
+		"-backend-config=bucket="+cfg.Bucket,
+		"-backend-config=key="+cfg.Key,
+		"-backend-config=region="+cfg.Region,
+		"-backend-config=dynamodb_table="+cfg.Table,
+		"-backend-config=encrypt=true",
+	)
+	return args
+}
+
+func loadTerraformBackendConfig(environmentID string) (terraformBackendConfig, error) {
+	bucket := strings.TrimSpace(os.Getenv("DOKLAB_TERRAFORM_STATE_BUCKET"))
+	region := strings.TrimSpace(os.Getenv("DOKLAB_TERRAFORM_STATE_REGION"))
+	table := strings.TrimSpace(os.Getenv("DOKLAB_TERRAFORM_STATE_TABLE"))
+	prefix := strings.TrimSpace(os.Getenv("DOKLAB_TERRAFORM_STATE_KEY_PREFIX"))
+	if prefix == "" {
+		prefix = "docklab/environments"
+	}
+
+	if bucket == "" || region == "" || table == "" {
+		return terraformBackendConfig{}, ErrTerraformStateBackendConfigMissing
+	}
+
+	return terraformBackendConfig{
+		Bucket:    bucket,
+		Region:    region,
+		Table:     table,
+		KeyPrefix: prefix,
+		Key:       strings.TrimSuffix(prefix, "/") + "/" + environmentID + "/terraform.tfstate",
+	}, nil
+}
+
+func loadTerraformDestroyConfig(environmentID, terraformDir string) (terraformBackendConfig, []string, error) {
+	marker, markerExists, err := readTerraformBackendMarker(terraformDir)
+	if err != nil {
+		return terraformBackendConfig{}, nil, err
+	}
+	if markerExists {
+		cfg := terraformBackendConfig{
+			Bucket:    marker.Bucket,
+			Region:    marker.Region,
+			Table:     marker.Table,
+			KeyPrefix: marker.KeyPrefix,
+			Key:       marker.Key,
+		}
+		return cfg, terraformInitArgs(cfg), nil
+	}
+
+	localStatePath := filepath.Join(terraformDir, "terraform.tfstate")
+	if _, err := os.Stat(localStatePath); err == nil {
+		return terraformBackendConfig{}, []string{"init", "-input=false", "-no-color"}, nil
+	}
+
+	cfg, err := loadTerraformBackendConfig(environmentID)
+	if err != nil {
+		return terraformBackendConfig{}, nil, err
+	}
+	return cfg, terraformInitArgs(cfg), nil
+}
+
+func writeTerraformBackendMarker(dir string, cfg terraformBackendConfig) error {
+	marker := terraformBackendMarker{
+		Mode:      "s3",
+		Bucket:    cfg.Bucket,
+		Region:    cfg.Region,
+		Table:     cfg.Table,
+		KeyPrefix: cfg.KeyPrefix,
+		Key:       cfg.Key,
+	}
+
+	markerBytes, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal terraform backend marker: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, terraformBackendMarkerFile), markerBytes, 0o644); err != nil {
+		return fmt.Errorf("failed to write terraform backend marker: %w", err)
+	}
+
+	return nil
+}
+
+func readTerraformBackendMarker(terraformDir string) (terraformBackendMarker, bool, error) {
+	markerPath := filepath.Join(terraformDir, terraformBackendMarkerFile)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return terraformBackendMarker{}, false, nil
+		}
+		return terraformBackendMarker{}, false, fmt.Errorf("failed to read terraform backend marker: %w", err)
+	}
+
+	var marker terraformBackendMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return terraformBackendMarker{}, false, fmt.Errorf("failed to parse terraform backend marker: %w", err)
+	}
+
+	return marker, true, nil
 }
 
 func runTerraform(ctx context.Context, dir string, args ...string) error {
@@ -199,15 +343,22 @@ func parseTerraformOutputs(raw string) (string, string, error) {
 	return instanceID, publicIP, nil
 }
 
+const terraformBackendTemplate = `
+terraform {
+	required_version = ">= 1.5.0"
+	backend "s3" {}
+}
+`
+
 const terraformMainTemplate = `
 terraform {
-  required_version = ">= 1.5.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
+	required_version = ">= 1.5.0"
+	required_providers {
+		aws = {
+			source  = "hashicorp/aws"
+			version = "~> 5.0"
+		}
+	}
 }
 
 provider "aws" {

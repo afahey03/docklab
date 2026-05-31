@@ -310,7 +310,7 @@ func (s *EnvironmentService) destroyCloudResources(ctx context.Context, env *mod
 	}
 
 	destroyCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	err := s.terraformRunner.DestroyEC2(destroyCtx, env.TerraformDir)
+	err := s.terraformRunner.DestroyEC2(destroyCtx, env.ID, env.TerraformDir)
 	cancel()
 	if err != nil {
 		_, _ = s.repo.UpdateProvisioning(

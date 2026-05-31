@@ -123,6 +123,10 @@ Used variables:
 - `AWS_SECRET_ACCESS_KEY` (required for Terraform provisioning)
 - `AWS_SESSION_TOKEN` (optional, if using temporary credentials)
 - `AWS_DEFAULT_REGION` (optional, default `us-east-1`)
+- `DOKLAB_TERRAFORM_STATE_BUCKET` (required for remote Terraform state)
+- `DOKLAB_TERRAFORM_STATE_REGION` (required for remote Terraform state)
+- `DOKLAB_TERRAFORM_STATE_TABLE` (required for DynamoDB locking; table needs a `LockID` string partition key)
+- `DOKLAB_TERRAFORM_STATE_KEY_PREFIX` (optional, default `docklab/environments`)
 
 ## Validation commands
 
@@ -138,3 +142,23 @@ Frontend:
 cd frontend
 npm run build
 ```
+
+## Terraform state backend setup
+
+Before provisioning, create or point DockLab at:
+
+- An S3 bucket for Terraform state storage
+- A DynamoDB table for state locking with `LockID` as the partition key
+
+Then set the four `DOKLAB_TERRAFORM_STATE_*` variables above in your `.env`.
+
+## End-to-end test checklist
+
+1. Start PostgreSQL and the backend with `docker compose up --build`.
+2. Start the frontend with `cd frontend && npm run dev`.
+3. Log in and create a local environment.
+4. Provision it with a valid AWS region, AMI, instance type, and credentials.
+5. Confirm the operation row advances from queued to running to succeeded.
+6. Verify the environment card updates with `provisioned`, instance ID, and public IP.
+7. Use `Terminate EC2` and confirm the cloud resources are removed while the environment remains.
+8. Use `Delete` and confirm both the environment row and EC2 resources are removed.

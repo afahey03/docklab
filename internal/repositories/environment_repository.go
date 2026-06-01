@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/afahey03/docklab/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,13 @@ type EnvironmentRepository interface {
 	UpdateStatus(ctx context.Context, id, userEmail, status string) (*models.Environment, error)
 	UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, instanceID, publicIP, terraformDir, cloudError string) (*models.Environment, error)
 	Delete(ctx context.Context, id, userEmail string) error
+
+	// Activity tracking
+	UpdateLastActivity(ctx context.Context, id string) error
+	ListRunningIdleSince(ctx context.Context, since time.Time) ([]models.Environment, error)
+
+	// Reconciliation
+	ReconcileStaleProvisioning(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 type PostgresEnvironmentRepository struct {
@@ -28,19 +36,13 @@ func NewPostgresEnvironmentRepository(db *pgxpool.Pool) *PostgresEnvironmentRepo
 	return &PostgresEnvironmentRepository{db: db}
 }
 
-func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID string) (*models.Environment, error) {
-	if r.db == nil {
-		return nil, errors.New("database connection is nil")
-	}
+// envColumns is the canonical ordered column list used in all SELECT/RETURNING clauses.
+const envColumns = `id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, last_activity_at, created_at, updated_at`
 
-	const query = `
-		INSERT INTO environments (user_email, name, image, status, container_id)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, created_at, updated_at
-	`
-
-	var env models.Environment
-	err := r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID).Scan(
+func scanEnv(row interface {
+	Scan(dest ...any) error
+}, env *models.Environment) error {
+	return row.Scan(
 		&env.ID,
 		&env.UserEmail,
 		&env.Name,
@@ -53,13 +55,26 @@ func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, n
 		&env.PublicIP,
 		&env.TerraformDir,
 		&env.CloudError,
+		&env.LastActivityAt,
 		&env.CreatedAt,
 		&env.UpdatedAt,
 	)
-	if err != nil {
-		return nil, err
+}
+
+func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID string) (*models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
 	}
 
+	query := `
+		INSERT INTO environments (user_email, name, image, status, container_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING ` + envColumns
+
+	var env models.Environment
+	if err := scanEnv(r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID), &env); err != nil {
+		return nil, err
+	}
 	return &env, nil
 }
 
@@ -68,12 +83,11 @@ func (r *PostgresEnvironmentRepository) ListByUserEmail(ctx context.Context, use
 		return nil, errors.New("database connection is nil")
 	}
 
-	const query = `
-		SELECT id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, created_at, updated_at
+	query := `
+		SELECT ` + envColumns + `
 		FROM environments
 		WHERE user_email = $1
-		ORDER BY created_at DESC
-	`
+		ORDER BY created_at DESC`
 
 	rows, err := r.db.Query(ctx, query, userEmail)
 	if err != nil {
@@ -84,22 +98,7 @@ func (r *PostgresEnvironmentRepository) ListByUserEmail(ctx context.Context, use
 	environments := make([]models.Environment, 0)
 	for rows.Next() {
 		var env models.Environment
-		if err := rows.Scan(
-			&env.ID,
-			&env.UserEmail,
-			&env.Name,
-			&env.Image,
-			&env.Status,
-			&env.ContainerID,
-			&env.CloudStatus,
-			&env.CloudRegion,
-			&env.InstanceID,
-			&env.PublicIP,
-			&env.TerraformDir,
-			&env.CloudError,
-			&env.CreatedAt,
-			&env.UpdatedAt,
-		); err != nil {
+		if err := scanEnv(rows, &env); err != nil {
 			return nil, err
 		}
 		environments = append(environments, env)
@@ -116,36 +115,19 @@ func (r *PostgresEnvironmentRepository) GetByIDForUser(ctx context.Context, id, 
 		return nil, errors.New("database connection is nil")
 	}
 
-	const query = `
-		SELECT id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, created_at, updated_at
+	query := `
+		SELECT ` + envColumns + `
 		FROM environments
-		WHERE id = $1 AND user_email = $2
-	`
+		WHERE id = $1 AND user_email = $2`
 
 	var env models.Environment
-	err := r.db.QueryRow(ctx, query, id, userEmail).Scan(
-		&env.ID,
-		&env.UserEmail,
-		&env.Name,
-		&env.Image,
-		&env.Status,
-		&env.ContainerID,
-		&env.CloudStatus,
-		&env.CloudRegion,
-		&env.InstanceID,
-		&env.PublicIP,
-		&env.TerraformDir,
-		&env.CloudError,
-		&env.CreatedAt,
-		&env.UpdatedAt,
-	)
+	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail), &env)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEnvironmentNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-
 	return &env, nil
 }
 
@@ -154,37 +136,20 @@ func (r *PostgresEnvironmentRepository) UpdateStatus(ctx context.Context, id, us
 		return nil, errors.New("database connection is nil")
 	}
 
-	const query = `
+	query := `
 		UPDATE environments
 		SET status = $3, updated_at = NOW()
 		WHERE id = $1 AND user_email = $2
-		RETURNING id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, created_at, updated_at
-	`
+		RETURNING ` + envColumns
 
 	var env models.Environment
-	err := r.db.QueryRow(ctx, query, id, userEmail, status).Scan(
-		&env.ID,
-		&env.UserEmail,
-		&env.Name,
-		&env.Image,
-		&env.Status,
-		&env.ContainerID,
-		&env.CloudStatus,
-		&env.CloudRegion,
-		&env.InstanceID,
-		&env.PublicIP,
-		&env.TerraformDir,
-		&env.CloudError,
-		&env.CreatedAt,
-		&env.UpdatedAt,
-	)
+	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail, status), &env)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEnvironmentNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-
 	return &env, nil
 }
 
@@ -193,7 +158,7 @@ func (r *PostgresEnvironmentRepository) UpdateProvisioning(ctx context.Context, 
 		return nil, errors.New("database connection is nil")
 	}
 
-	const query = `
+	query := `
 		UPDATE environments
 		SET
 			cloud_status = $3,
@@ -204,33 +169,16 @@ func (r *PostgresEnvironmentRepository) UpdateProvisioning(ctx context.Context, 
 			cloud_error = $8,
 			updated_at = NOW()
 		WHERE id = $1 AND user_email = $2
-		RETURNING id, user_email, name, image, status, container_id, cloud_status, cloud_region, instance_id, public_ip, terraform_dir, cloud_error, created_at, updated_at
-	`
+		RETURNING ` + envColumns
 
 	var env models.Environment
-	err := r.db.QueryRow(ctx, query, id, userEmail, cloudStatus, cloudRegion, instanceID, publicIP, terraformDir, cloudError).Scan(
-		&env.ID,
-		&env.UserEmail,
-		&env.Name,
-		&env.Image,
-		&env.Status,
-		&env.ContainerID,
-		&env.CloudStatus,
-		&env.CloudRegion,
-		&env.InstanceID,
-		&env.PublicIP,
-		&env.TerraformDir,
-		&env.CloudError,
-		&env.CreatedAt,
-		&env.UpdatedAt,
-	)
+	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail, cloudStatus, cloudRegion, instanceID, publicIP, terraformDir, cloudError), &env)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEnvironmentNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-
 	return &env, nil
 }
 
@@ -239,11 +187,7 @@ func (r *PostgresEnvironmentRepository) Delete(ctx context.Context, id, userEmai
 		return errors.New("database connection is nil")
 	}
 
-	const query = `
-		DELETE FROM environments
-		WHERE id = $1 AND user_email = $2
-	`
-
+	const query = `DELETE FROM environments WHERE id = $1 AND user_email = $2`
 	result, err := r.db.Exec(ctx, query, id, userEmail)
 	if err != nil {
 		return err
@@ -251,6 +195,80 @@ func (r *PostgresEnvironmentRepository) Delete(ctx context.Context, id, userEmai
 	if result.RowsAffected() == 0 {
 		return ErrEnvironmentNotFound
 	}
-
 	return nil
+}
+
+// UpdateLastActivity refreshes the last_activity_at timestamp for an environment.
+// This is an internal maintenance operation and does not require a userEmail guard.
+func (r *PostgresEnvironmentRepository) UpdateLastActivity(ctx context.Context, id string) error {
+	if r.db == nil {
+		return errors.New("database connection is nil")
+	}
+	_, err := r.db.Exec(ctx, `UPDATE environments SET last_activity_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+// ListRunningIdleSince returns all running environments whose last_activity_at is before
+// the given cutoff time. Used by the lifecycle worker to find idle environments to stop.
+func (r *PostgresEnvironmentRepository) ListRunningIdleSince(ctx context.Context, since time.Time) ([]models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + envColumns + `
+		FROM environments
+		WHERE status = 'running'
+		  AND last_activity_at < $1`
+
+	rows, err := r.db.Query(ctx, query, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	environments := make([]models.Environment, 0)
+	for rows.Next() {
+		var env models.Environment
+		if err := scanEnv(rows, &env); err != nil {
+			return nil, err
+		}
+		environments = append(environments, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return environments, nil
+}
+
+// ReconcileStaleProvisioning marks environments stuck in a transitional cloud_status
+// (provisioning or deprovisioning) for longer than olderThan with no active operation
+// as provision_failed. Returns the number of environments updated.
+func (r *PostgresEnvironmentRepository) ReconcileStaleProvisioning(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	cutoff := time.Now().Add(-olderThan)
+	const query = `
+		UPDATE environments
+		SET
+			cloud_status = 'provision_failed',
+			cloud_error  = 'provisioning timed out: no active operation found during reconciliation',
+			updated_at   = NOW()
+		WHERE cloud_status IN ('provisioning', 'deprovisioning')
+		  AND updated_at < $1
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM operations
+			WHERE environment_id = environments.id::text
+			  AND status IN ('queued', 'running')
+		  )`
+
+	result, err := r.db.Exec(ctx, query, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

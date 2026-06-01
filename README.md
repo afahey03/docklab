@@ -50,6 +50,8 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Local Docker workspace lifecycle via backend service
 - PTY-backed browser terminal (xterm.js + WebSocket + resize) for running environments
 - Structured JSON logging (`log/slog`)
+- Cloud drift/orphan reconciliation: background service marks stale provisioning states and timed-out operations as failed (runs every 5 minutes)
+- Auto-sleep lifecycle worker: automatically stops idle running environments after a configurable idle timeout; terminal sessions refresh activity timestamps every 60 s
 
 ## Local development
 
@@ -94,6 +96,7 @@ Frontend runs at `http://localhost:5173`.
 11. Use Delete to remove both the environment and provisioned cloud resources.
 12. Long-running cloud actions run asynchronously; the dashboard tracks progress until completion.
 13. Operation status is persisted in PostgreSQL, so polling state survives backend restarts.
+14. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped to prevent resource waste.
 
 Terminal tips:
 - Copy selected terminal text with `Ctrl+Shift+C`.
@@ -127,6 +130,7 @@ Used variables:
 - `DOKLAB_TERRAFORM_STATE_REGION` (required for remote Terraform state)
 - `DOKLAB_TERRAFORM_STATE_TABLE` (required for DynamoDB locking; table needs a `LockID` string partition key)
 - `DOKLAB_TERRAFORM_STATE_KEY_PREFIX` (optional, default `docklab/environments`)
+- `IDLE_STOP_AFTER_MINUTES` (optional, default `60`) — minutes of terminal inactivity before a running environment is automatically stopped
 
 ## Validation commands
 

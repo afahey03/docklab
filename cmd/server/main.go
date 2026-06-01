@@ -40,12 +40,25 @@ func main() {
 	environmentRepo := repositories.NewPostgresEnvironmentRepository(dbPool)
 	operationRepo := repositories.NewPostgresOperationRepository(dbPool)
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
-	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, services.NewDockerCLIRuntime())
+	dockerRuntime := services.NewDockerCLIRuntime()
+	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, dockerRuntime)
 	terminalService := services.NewTerminalService(environmentRepo)
 	authHandler := handlers.NewAuthHandler(authService)
 	environmentHandler := handlers.NewEnvironmentHandler(environmentService)
 	terminalHandler := handlers.NewTerminalHandler(authService, terminalService)
 	healthHandler := handlers.NewHealthHandler(dbPool)
+
+	// Background context cancelled on shutdown to cleanly stop background workers.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
+	// Sprint 4: cloud drift / orphan reconciliation.
+	reconciler := services.NewReconciliationService(environmentRepo, operationRepo, logr)
+	reconciler.Start(bgCtx)
+
+	// Sprint 5: auto-sleep idle environments.
+	lifecycle := services.NewLifecycleService(environmentRepo, dockerRuntime, cfg.IdleStopMinutes, logr)
+	lifecycle.Start(bgCtx)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -101,6 +114,9 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+
+	// Stop background workers before shutting down the HTTP server.
+	bgCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

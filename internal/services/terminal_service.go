@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/afahey03/docklab/internal/repositories"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
+
+const activityRefreshInterval = 60 * time.Second
 
 var ErrEnvironmentNotRunning = errors.New("environment must be running to open terminal")
 
@@ -38,6 +41,27 @@ func (s *TerminalService) ProxySession(ctx context.Context, userEmail, environme
 	if env.Status != "running" {
 		return ErrEnvironmentNotRunning
 	}
+
+	// Record that the environment is active. We fire-and-forget so a slow DB write
+	// doesn't delay the terminal opening. We also refresh on a ticker while the
+	// session is alive so long-running sessions don't get auto-stopped.
+	activityCtx, activityCancel := context.WithCancel(ctx)
+	defer activityCancel()
+
+	go func() {
+		_ = s.environmentRepo.UpdateLastActivity(activityCtx, environmentID)
+
+		ticker := time.NewTicker(activityRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-activityCtx.Done():
+				return
+			case <-ticker.C:
+				_ = s.environmentRepo.UpdateLastActivity(activityCtx, environmentID)
+			}
+		}
+	}()
 
 	cmd := exec.CommandContext(ctx, "docker", "exec", "-it", env.ContainerID, "sh")
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})

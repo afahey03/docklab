@@ -6,20 +6,22 @@ import (
 )
 
 type Config struct {
-	AppEnv        string
-	Port          string
-	DatabaseURL   string
-	JWTSecret     string
-	JWTTTLMinutes int
+	AppEnv          string
+	Port            string
+	DatabaseURL     string
+	JWTSecret       string
+	JWTTTLMinutes   int
+	IdleStopMinutes int
 }
 
 func Load() Config {
 	return Config{
-		AppEnv:        getEnv("APP_ENV", "development"),
-		Port:          getEnv("PORT", "8080"),
-		DatabaseURL:   getEnv("DATABASE_URL", "host=localhost port=5432 user=postgres dbname=docklab sslmode=disable"),
-		JWTSecret:     getEnv("JWT_SECRET", "dev-secret-change-me"),
-		JWTTTLMinutes: getEnvAsInt("JWT_TTL_MINUTES", 60),
+		AppEnv:          getEnv("APP_ENV", "development"),
+		Port:            getEnv("PORT", "8080"),
+		DatabaseURL:     getEnv("DATABASE_URL", "host=localhost port=5432 user=postgres dbname=docklab sslmode=disable"),
+		JWTSecret:       getEnv("JWT_SECRET", "dev-secret-change-me"),
+		JWTTTLMinutes:   getEnvAsInt("JWT_TTL_MINUTES", 60),
+		IdleStopMinutes: getEnvAsInt("IDLE_STOP_AFTER_MINUTES", 60),
 	}
 }
 

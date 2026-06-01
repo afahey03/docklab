@@ -33,6 +33,8 @@ type ConfirmDialogState = {
 
 const OPERATION_POLL_INTERVAL_MS = 2000;
 const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
+const RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS = 5000;
+const IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS = 30000;
 
 export function DashboardPage() {
     const navigate = useNavigate();
@@ -173,6 +175,22 @@ export function DashboardPage() {
 
         void bootstrapDashboard();
     }, [navigate]);
+
+    useEffect(() => {
+        const refreshInterval = environments.some((environment) => environment.status === "running")
+            ? RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS
+            : IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS;
+
+        const intervalID = window.setInterval(() => {
+            void refreshEnvironments().catch(() => {
+                // Ignore transient refresh failures and preserve the last known dashboard state.
+            });
+        }, refreshInterval);
+
+        return () => {
+            window.clearInterval(intervalID);
+        };
+    }, [environments]);
 
     useEffect(() => {
         return () => {

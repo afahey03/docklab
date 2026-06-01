@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/afahey03/docklab/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -16,6 +17,9 @@ type OperationRepository interface {
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Operation, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status, errorMessage string) (*models.Operation, error)
 	ExistsInProgressForEnvironment(ctx context.Context, environmentID, userEmail string) (bool, error)
+
+	// Reconciliation: marks queued/running operations older than olderThan as failed.
+	MarkStaleAsFailed(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 type PostgresOperationRepository struct {
@@ -141,4 +145,27 @@ func (r *PostgresOperationRepository) ExistsInProgressForEnvironment(ctx context
 	}
 
 	return exists, nil
+}
+
+// MarkStaleAsFailed transitions any operations stuck in queued or running for longer than
+// olderThan to failed status. Returns the number of operations updated.
+func (r *PostgresOperationRepository) MarkStaleAsFailed(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	cutoff := time.Now().Add(-olderThan)
+	const query = `
+		UPDATE operations
+		SET status     = 'failed',
+		    error      = 'operation timed out: exceeded maximum allowed duration',
+		    updated_at = NOW()
+		WHERE status IN ('queued', 'running')
+		  AND updated_at < $1`
+
+	result, err := r.db.Exec(ctx, query, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

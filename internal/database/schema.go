@@ -100,5 +100,13 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to ensure operations columns: %w", err)
 	}
 
+	const activityColumns = `
+		ALTER TABLE environments ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+	`
+
+	if _, err := pool.Exec(ctx, activityColumns); err != nil {
+		return fmt.Errorf("failed to ensure last_activity_at column: %w", err)
+	}
+
 	return nil
 }

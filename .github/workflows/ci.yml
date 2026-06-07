@@ -66,13 +66,31 @@ jobs:
       - name: Build
         run: npm run build
 
-  docker-build:
-    name: Docker build
-    runs-on: ubuntu-latest
+    docker-build:
+      name: Docker build
+      runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v5
 
-      - name: Build backend image
-        run: docker build -t docklab-backend-ci .
+        - name: Pull base images with retry
+          run: |
+            images=(
+              golang:1.25-alpine
+              hashicorp/terraform:1.9.8
+              alpine:3.20
+            )
+
+            for image in "${images[@]}"; do
+              success=0
+              for i in 1 2 3; do
+                docker pull "$image" && success=1 && break
+                echo "Failed pulling $image, retry $i/3"
+                sleep 15
+              done
+              [ "$success" -eq 1 ] || exit 1
+            done
+
+        - name: Build backend image
+          run: docker build -t docklab-backend-ci .

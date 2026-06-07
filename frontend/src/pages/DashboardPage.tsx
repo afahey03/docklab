@@ -20,6 +20,7 @@ import { clearToken, getToken } from "../lib/auth";
 
 type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud";
 type ConfirmAction = "delete_environment" | "destroy_cloud";
+type DashboardView = "environments" | "usage" | "settings";
 
 type ConfirmDialogState = {
     open: boolean;
@@ -36,8 +37,101 @@ const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
 const RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS = 5000;
 const IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS = 30000;
 
+const INSTANCE_HOURLY_RATE_USD: Record<string, number> = {
+    "t3.nano": 0.0052,
+    "t3.micro": 0.0104,
+    "t3.small": 0.0208,
+    "t3.medium": 0.0416,
+    "t3.large": 0.0832,
+    "t3.xlarge": 0.1664,
+    "t3.2xlarge": 0.3328,
+};
+
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+});
+
+type EnvironmentUsageSummary = {
+    isCloudActive: boolean;
+    runtimeHours: number | null;
+    formattedRuntime: string;
+    hourlyRate: number | null;
+    estimatedSpend: number | null;
+    estimatedMonthly: number | null;
+};
+
+function getCloudHourlyRate(instanceType: string): number | null {
+    if (!instanceType) {
+        return null;
+    }
+
+    return INSTANCE_HOURLY_RATE_USD[instanceType.toLowerCase()] ?? null;
+}
+
+function formatCurrency(value: number | null): string {
+    if (value === null) {
+        return "N/A";
+    }
+
+    return currencyFormatter.format(value);
+}
+
+function formatRuntimeHours(hours: number | null): string {
+    if (hours === null || !Number.isFinite(hours) || hours < 0) {
+        return "N/A";
+    }
+
+    const totalMinutes = Math.max(0, Math.floor(hours * 60));
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const remainingMinutesAfterDays = totalMinutes % (24 * 60);
+    const wholeHours = Math.floor(remainingMinutesAfterDays / 60);
+    const minutes = remainingMinutesAfterDays % 60;
+
+    if (days > 0) {
+        return `${days}d ${wholeHours}h`;
+    }
+    if (wholeHours > 0) {
+        return `${wholeHours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+}
+
+function getEnvironmentUsageSummary(env: Environment): EnvironmentUsageSummary {
+    const isCloudActive = Boolean(env.instance_id || env.terraform_dir || env.cloud_status === "provisioned");
+    const hourlyRate = getCloudHourlyRate(env.cloud_instance_type);
+
+    if (!isCloudActive || !env.cloud_provisioned_at) {
+        return {
+            isCloudActive,
+            runtimeHours: null,
+            formattedRuntime: "N/A",
+            hourlyRate,
+            estimatedSpend: null,
+            estimatedMonthly: hourlyRate === null ? null : hourlyRate * 24 * 30,
+        };
+    }
+
+    const provisionedAt = new Date(env.cloud_provisioned_at);
+    const runtimeHours = Number.isNaN(provisionedAt.getTime())
+        ? null
+        : Math.max(0, (Date.now() - provisionedAt.getTime()) / (1000 * 60 * 60));
+
+    return {
+        isCloudActive,
+        runtimeHours,
+        formattedRuntime: formatRuntimeHours(runtimeHours),
+        hourlyRate,
+        estimatedSpend: runtimeHours === null || hourlyRate === null ? null : runtimeHours * hourlyRate,
+        estimatedMonthly: hourlyRate === null ? null : hourlyRate * 24 * 30,
+    };
+}
+
 export function DashboardPage() {
     const navigate = useNavigate();
+    const [activeView, setActiveView] = useState<DashboardView>("environments");
     const [email, setEmail] = useState("");
     const [environments, setEnvironments] = useState<Environment[]>([]);
     const [name, setName] = useState("");
@@ -68,6 +162,14 @@ export function DashboardPage() {
     const terminalReconnectTimerRef = useRef<number | null>(null);
     const manualTerminalCloseRef = useRef(false);
     const reconnectAttemptsRef = useRef(0);
+    const environmentUsage = environments.map((environment) => ({
+        environment,
+        usage: getEnvironmentUsageSummary(environment),
+    }));
+    const activeCloudUsage = environmentUsage.filter((entry) => entry.usage.isCloudActive);
+    const activeCloudEnvironmentCount = environmentUsage.filter((entry) => entry.usage.isCloudActive).length;
+    const totalEstimatedSpend = environmentUsage.reduce((total, entry) => total + (entry.usage.estimatedSpend ?? 0), 0);
+    const totalEstimatedMonthly = environmentUsage.reduce((total, entry) => total + (entry.usage.estimatedMonthly ?? 0), 0);
 
     useEffect(() => {
         if (!terminalContainerRef.current) {
@@ -555,17 +657,45 @@ export function DashboardPage() {
                     <aside className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                         <h2 className="text-lg font-semibold">DockLab</h2>
                         <nav className="mt-4 space-y-2 text-sm text-slate-300">
-                            <p className="rounded-md bg-slate-800 px-3 py-2">Environments</p>
-                            <p className="rounded-md px-3 py-2">Usage & Cost</p>
-                            <p className="rounded-md px-3 py-2">Settings</p>
+                            <button
+                                className={`w-full rounded-md px-3 py-2 text-left ${activeView === "environments" ? "bg-slate-800 text-slate-100" : "text-slate-300 hover:bg-slate-800/60"}`}
+                                type="button"
+                                onClick={() => setActiveView("environments")}
+                            >
+                                Environments
+                            </button>
+                            <button
+                                className={`w-full rounded-md px-3 py-2 text-left ${activeView === "usage" ? "bg-slate-800 text-slate-100" : "text-slate-300 hover:bg-slate-800/60"}`}
+                                type="button"
+                                onClick={() => setActiveView("usage")}
+                            >
+                                Usage & Cost
+                            </button>
+                            <button
+                                className={`w-full rounded-md px-3 py-2 text-left ${activeView === "settings" ? "bg-slate-800 text-slate-100" : "text-slate-300 hover:bg-slate-800/60"}`}
+                                type="button"
+                                onClick={() => setActiveView("settings")}
+                            >
+                                Settings
+                            </button>
                         </nav>
                     </aside>
 
                     <section className="space-y-4">
                         <header className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                            <h1 className="text-xl font-semibold">Dashboard</h1>
+                            <h1 className="text-xl font-semibold">
+                                {activeView === "environments"
+                                    ? "Environments"
+                                    : activeView === "usage"
+                                        ? "Usage & Cost"
+                                        : "Settings"}
+                            </h1>
                             <p className="mt-1 text-sm text-slate-400">
-                                Launch and manage remote development environments.
+                                {activeView === "environments"
+                                    ? "Launch and manage remote development environments."
+                                    : activeView === "usage"
+                                        ? "Review estimated EC2 runtime and cloud spend for your provisioned environments."
+                                        : "Adjust shared defaults for provisioning and environment management."}
                             </p>
                             <div className="mt-3 flex items-center justify-between">
                                 <p className="text-sm text-slate-300">Signed in as {email || "loading..."}</p>
@@ -579,215 +709,315 @@ export function DashboardPage() {
                             </div>
                         </header>
 
-                        <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                            <h3 className="font-medium">Create environment</h3>
-                            <p className="mt-1 text-sm text-slate-400">Launch a local Docker workspace for your user.</p>
+                        {notice ? (
+                            <article className="rounded-xl border border-emerald-800 bg-emerald-950/30 p-4 text-sm text-emerald-300">
+                                {notice}
+                            </article>
+                        ) : null}
+                        {error ? (
+                            <article className="rounded-xl border border-rose-800 bg-rose-950/30 p-4 text-sm text-rose-300">
+                                {error}
+                            </article>
+                        ) : null}
 
-                            <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="Environment name (optional)"
-                                    value={name}
-                                    onChange={(event) => setName(event.target.value)}
-                                    maxLength={64}
-                                />
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="Docker image"
-                                    value={image}
-                                    onChange={(event) => setImage(event.target.value)}
-                                    maxLength={128}
-                                />
-                                <button
-                                    className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
-                                    type="button"
-                                    disabled={isCreating}
-                                    onClick={handleCreateEnvironment}
-                                >
-                                    {isCreating ? "Working..." : "Create"}
-                                </button>
-                            </div>
-                            {notice ? <p className="mt-3 text-sm text-emerald-400">{notice}</p> : null}
-                            {error ? <p className="mt-3 text-sm text-rose-400">{error}</p> : null}
-                        </article>
+                        {activeView === "environments" ? (
+                            <>
+                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                    <h3 className="font-medium">Create environment</h3>
+                                    <p className="mt-1 text-sm text-slate-400">Launch a local Docker workspace for your user.</p>
 
-                        <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                            <h3 className="font-medium">Cloud provisioning defaults</h3>
-                            <p className="mt-1 text-sm text-slate-400">
-                                Used when you click Provision on an environment.
-                            </p>
-
-                            <div className="mt-4 grid gap-3 md:grid-cols-2">
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="AWS region"
-                                    value={awsRegion}
-                                    onChange={(event) => setAWSRegion(event.target.value)}
-                                    maxLength={32}
-                                />
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="Instance type"
-                                    value={instanceType}
-                                    onChange={(event) => setInstanceType(event.target.value)}
-                                    maxLength={32}
-                                />
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="AMI ID"
-                                    value={amiID}
-                                    onChange={(event) => setAMIID(event.target.value)}
-                                    maxLength={32}
-                                />
-                                <input
-                                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                    placeholder="EC2 key pair name (optional)"
-                                    value={keyName}
-                                    onChange={(event) => setKeyName(event.target.value)}
-                                    maxLength={64}
-                                />
-                            </div>
-                        </article>
-
-                        <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                            <h3 className="font-medium">Your environments</h3>
-                            {isLoadingEnvironments ? (
-                                <p className="mt-1 text-sm text-slate-400">Loading environments...</p>
-                            ) : environments.length === 0 ? (
-                                <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
-                            ) : (
-                                <div className="mt-3 space-y-3">
-                                    {environments.map((env) => (
-                                        <div
-                                            key={env.id}
-                                            className="rounded-md border border-slate-800 bg-slate-950 p-3"
+                                    <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+                                        <input
+                                            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                            placeholder="Environment name (optional)"
+                                            value={name}
+                                            onChange={(event) => setName(event.target.value)}
+                                            maxLength={64}
+                                        />
+                                        <input
+                                            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                            placeholder="Docker image"
+                                            value={image}
+                                            onChange={(event) => setImage(event.target.value)}
+                                            maxLength={128}
+                                        />
+                                        <button
+                                            className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
+                                            type="button"
+                                            disabled={isCreating}
+                                            onClick={handleCreateEnvironment}
                                         >
-                                            <div className="flex flex-wrap items-center justify-between gap-2">
-                                                <div>
-                                                    <p className="font-medium text-slate-100">{env.name}</p>
-                                                    <p className="text-xs text-slate-400">{env.image}</p>
-                                                    <p className="text-xs text-slate-500">
-                                                        Cloud: {env.cloud_status || "not_provisioned"}
-                                                        {env.public_ip ? ` | IP: ${env.public_ip}` : ""}
-                                                    </p>
-                                                    {env.cloud_error ? (
-                                                        <p className="text-xs text-rose-400">{env.cloud_error}</p>
-                                                    ) : null}
+                                            {isCreating ? "Working..." : "Create"}
+                                        </button>
+                                    </div>
+                                </article>
+
+                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                    <h3 className="font-medium">Your environments</h3>
+                                    {isLoadingEnvironments ? (
+                                        <p className="mt-1 text-sm text-slate-400">Loading environments...</p>
+                                    ) : environments.length === 0 ? (
+                                        <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
+                                    ) : (
+                                        <div className="mt-3 space-y-3">
+                                            {environmentUsage.map(({ environment: env }) => (
+                                                <div key={env.id} className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                        <div>
+                                                            <p className="font-medium text-slate-100">{env.name}</p>
+                                                            <p className="text-xs text-slate-400">{env.image}</p>
+                                                            <p className="text-xs text-slate-500">
+                                                                Cloud: {env.cloud_status || "not_provisioned"}
+                                                                {env.public_ip ? ` | IP: ${env.public_ip}` : ""}
+                                                            </p>
+                                                            {env.cloud_instance_type ? (
+                                                                <p className="text-xs text-slate-500">
+                                                                    Type: {env.cloud_instance_type}
+                                                                    {env.cloud_region ? ` | Region: ${env.cloud_region}` : ""}
+                                                                </p>
+                                                            ) : null}
+                                                            {env.cloud_error ? (
+                                                                <p className="text-xs text-rose-400">{env.cloud_error}</p>
+                                                            ) : null}
+                                                        </div>
+                                                        <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
+                                                            {env.status}
+                                                        </span>
+                                                    </div>
+
+                                                    <div className="mt-3 flex flex-wrap gap-2">
+                                                        <button
+                                                            className="rounded-md border border-emerald-700 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={isEnvironmentPending(env.id) || env.status === "running"}
+                                                            onClick={() => handleStartEnvironment(env.id)}
+                                                        >
+                                                            {isEnvironmentActionPending(env.id, "start") ? "Starting..." : "Start"}
+                                                        </button>
+                                                        <button
+                                                            className="rounded-md border border-amber-700 px-3 py-1 text-xs text-amber-300 hover:bg-amber-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={isEnvironmentPending(env.id) || env.status !== "running"}
+                                                            onClick={() => handleStopEnvironment(env.id)}
+                                                        >
+                                                            {isEnvironmentActionPending(env.id, "stop") ? "Stopping..." : "Stop"}
+                                                        </button>
+                                                        <button
+                                                            className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={isEnvironmentPending(env.id)}
+                                                            onClick={() => promptDeleteEnvironment(env.id)}
+                                                        >
+                                                            {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
+                                                        </button>
+                                                        <button
+                                                            className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={
+                                                                isEnvironmentPending(env.id)
+                                                                || (!env.instance_id && !env.terraform_dir && env.cloud_status !== "provisioned")
+                                                            }
+                                                            onClick={() => promptDestroyCloudEnvironment(env.id)}
+                                                        >
+                                                            {isEnvironmentActionPending(env.id, "destroy_cloud") ? "Terminating..." : "Terminate EC2"}
+                                                        </button>
+                                                        <button
+                                                            className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={
+                                                                env.status !== "running"
+                                                                || isEnvironmentPending(env.id)
+                                                                || activeTerminalEnvironmentId === env.id
+                                                            }
+                                                            onClick={() => openTerminal(env.id)}
+                                                        >
+                                                            {activeTerminalEnvironmentId === env.id ? "Terminal open" : "Terminal"}
+                                                        </button>
+                                                        <button
+                                                            className="rounded-md border border-indigo-700 px-3 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                            type="button"
+                                                            disabled={isEnvironmentPending(env.id) || env.cloud_status === "provisioned"}
+                                                            onClick={() => handleProvisionEnvironment(env.id)}
+                                                        >
+                                                            {env.cloud_status === "provisioned"
+                                                                ? "Provisioned"
+                                                                : isEnvironmentActionPending(env.id, "provision")
+                                                                    ? "Provisioning..."
+                                                                    : "Provision"}
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                                <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
-                                                    {env.status}
-                                                </span>
-                                            </div>
-
-                                            <div className="mt-3 flex flex-wrap gap-2">
-                                                <button
-                                                    className="rounded-md border border-emerald-700 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={isEnvironmentPending(env.id) || env.status === "running"}
-                                                    onClick={() => handleStartEnvironment(env.id)}
-                                                >
-                                                    {isEnvironmentActionPending(env.id, "start") ? "Starting..." : "Start"}
-                                                </button>
-                                                <button
-                                                    className="rounded-md border border-amber-700 px-3 py-1 text-xs text-amber-300 hover:bg-amber-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={isEnvironmentPending(env.id) || env.status !== "running"}
-                                                    onClick={() => handleStopEnvironment(env.id)}
-                                                >
-                                                    {isEnvironmentActionPending(env.id, "stop") ? "Stopping..." : "Stop"}
-                                                </button>
-                                                <button
-                                                    className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={isEnvironmentPending(env.id)}
-                                                    onClick={() => promptDeleteEnvironment(env.id)}
-                                                >
-                                                    {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
-                                                </button>
-                                                <button
-                                                    className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={
-                                                        isEnvironmentPending(env.id)
-                                                        || (!env.instance_id && !env.terraform_dir && env.cloud_status !== "provisioned")
-                                                    }
-                                                    onClick={() => promptDestroyCloudEnvironment(env.id)}
-                                                >
-                                                    {isEnvironmentActionPending(env.id, "destroy_cloud") ? "Terminating..." : "Terminate EC2"}
-                                                </button>
-                                                <button
-                                                    className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={
-                                                        env.status !== "running"
-                                                        || isEnvironmentPending(env.id)
-                                                        || activeTerminalEnvironmentId === env.id
-                                                    }
-                                                    onClick={() => openTerminal(env.id)}
-                                                >
-                                                    {activeTerminalEnvironmentId === env.id ? "Terminal open" : "Terminal"}
-                                                </button>
-                                                <button
-                                                    className="rounded-md border border-indigo-700 px-3 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                    type="button"
-                                                    disabled={isEnvironmentPending(env.id) || env.cloud_status === "provisioned"}
-                                                    onClick={() => handleProvisionEnvironment(env.id)}
-                                                >
-                                                    {env.cloud_status === "provisioned"
-                                                        ? "Provisioned"
-                                                        : isEnvironmentActionPending(env.id, "provision")
-                                                            ? "Provisioning..."
-                                                            : "Provision"}
-                                                </button>
-                                            </div>
+                                            ))}
                                         </div>
-                                    ))}
-                                </div>
-                            )}
-                        </article>
+                                    )}
+                                </article>
 
-                        <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                            <div className="flex items-center justify-between">
-                                <h3 className="font-medium">Browser terminal</h3>
-                                <div className="flex gap-2">
-                                    <button
-                                        className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50"
-                                        type="button"
-                                        disabled={!activeTerminalEnvironmentId || terminalConnected}
-                                        onClick={reconnectTerminal}
-                                    >
-                                        Reconnect
-                                    </button>
-                                    <button
-                                        className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                        type="button"
-                                        disabled={!activeTerminalEnvironmentId}
-                                        onClick={closeTerminal}
-                                    >
-                                        Close session
-                                    </button>
-                                </div>
-                            </div>
+                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="font-medium">Browser terminal</h3>
+                                        <div className="flex gap-2">
+                                            <button
+                                                className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50"
+                                                type="button"
+                                                disabled={!activeTerminalEnvironmentId || terminalConnected}
+                                                onClick={reconnectTerminal}
+                                            >
+                                                Reconnect
+                                            </button>
+                                            <button
+                                                className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                                type="button"
+                                                disabled={!activeTerminalEnvironmentId}
+                                                onClick={closeTerminal}
+                                            >
+                                                Close session
+                                            </button>
+                                        </div>
+                                    </div>
 
-                            {!activeTerminalEnvironmentId ? (
-                                <p className="mt-2 text-sm text-slate-400">
-                                    Select Terminal on a running environment to start a shell session.
+                                    {!activeTerminalEnvironmentId ? (
+                                        <p className="mt-2 text-sm text-slate-400">
+                                            Select Terminal on a running environment to start a shell session.
+                                        </p>
+                                    ) : (
+                                        <div className="mt-2 flex items-center justify-between">
+                                            <p className="text-xs text-slate-400">
+                                                Active environment: {activeTerminalEnvironmentId}
+                                            </p>
+                                            <p className="text-xs text-slate-500">
+                                                {terminalConnected ? "Connected" : "Disconnected"} | Copy: Ctrl+Shift+C | Paste: Ctrl+Shift+V
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2">
+                                        <div className="h-72" ref={terminalContainerRef} />
+                                    </div>
+                                </article>
+                            </>
+                        ) : null}
+
+                        {activeView === "usage" ? (
+                            <>
+                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <h3 className="font-medium">Usage & cost overview</h3>
+                                            <p className="mt-1 text-sm text-slate-400">
+                                                Estimated EC2 runtime spend based on tracked provision time and common on-demand rates.
+                                            </p>
+                                        </div>
+                                        <p className="text-xs text-slate-500">Rates are estimates, not AWS billing data.</p>
+                                    </div>
+
+                                    <div className="mt-4 grid gap-3 md:grid-cols-3">
+                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                            <p className="text-xs uppercase tracking-wide text-slate-500">Cloud environments</p>
+                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{activeCloudEnvironmentCount}</p>
+                                            <p className="mt-1 text-xs text-slate-400">Provisioned or deprovisioning environments with tracked cloud state.</p>
+                                        </div>
+                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                            <p className="text-xs uppercase tracking-wide text-slate-500">Estimated accrued spend</p>
+                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{formatCurrency(totalEstimatedSpend)}</p>
+                                            <p className="mt-1 text-xs text-slate-400">Based on runtime since `cloud_provisioned_at`.</p>
+                                        </div>
+                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                            <p className="text-xs uppercase tracking-wide text-slate-500">Projected monthly run rate</p>
+                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{formatCurrency(totalEstimatedMonthly)}</p>
+                                            <p className="mt-1 text-xs text-slate-400">Assumes the current instance mix runs 24/7 for 30 days.</p>
+                                        </div>
+                                    </div>
+                                </article>
+
+                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                    <h3 className="font-medium">Cloud environment estimates</h3>
+                                    {activeCloudUsage.length === 0 ? (
+                                        <p className="mt-2 text-sm text-slate-400">No provisioned cloud environments to estimate yet.</p>
+                                    ) : (
+                                        <div className="mt-3 space-y-3">
+                                            {activeCloudUsage.map(({ environment: env, usage }) => (
+                                                <div key={env.id} className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                        <div>
+                                                            <p className="font-medium text-slate-100">{env.name}</p>
+                                                            <p className="text-xs text-slate-500">
+                                                                {env.cloud_instance_type || "Unknown type"}
+                                                                {env.cloud_region ? ` | ${env.cloud_region}` : ""}
+                                                                {env.instance_id ? ` | ${env.instance_id}` : ""}
+                                                            </p>
+                                                        </div>
+                                                        <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
+                                                            {env.cloud_status}
+                                                        </span>
+                                                    </div>
+
+                                                    <div className="mt-3 grid gap-3 md:grid-cols-4">
+                                                        <div>
+                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Runtime</p>
+                                                            <p className="mt-1 text-sm text-slate-100">{usage.formattedRuntime}</p>
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Hourly rate</p>
+                                                            <p className="mt-1 text-sm text-slate-100">
+                                                                {usage.hourlyRate !== null ? `${formatCurrency(usage.hourlyRate)}/hr` : "N/A"}
+                                                            </p>
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Accrued estimate</p>
+                                                            <p className="mt-1 text-sm text-slate-100">{formatCurrency(usage.estimatedSpend)}</p>
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Monthly run rate</p>
+                                                            <p className="mt-1 text-sm text-slate-100">{formatCurrency(usage.estimatedMonthly)}</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </article>
+                            </>
+                        ) : null}
+
+                        {activeView === "settings" ? (
+                            <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                <h3 className="font-medium">Cloud provisioning defaults</h3>
+                                <p className="mt-1 text-sm text-slate-400">
+                                    Used when you click Provision on an environment.
                                 </p>
-                            ) : (
-                                <div className="mt-2 flex items-center justify-between">
-                                    <p className="text-xs text-slate-400">
-                                        Active environment: {activeTerminalEnvironmentId}
-                                    </p>
-                                    <p className="text-xs text-slate-500">
-                                        {terminalConnected ? "Connected" : "Disconnected"} | Copy: Ctrl+Shift+C | Paste: Ctrl+Shift+V
-                                    </p>
-                                </div>
-                            )}
 
-                            <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2">
-                                <div className="h-72" ref={terminalContainerRef} />
-                            </div>
-                        </article>
+                                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                                    <input
+                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                        placeholder="AWS region"
+                                        value={awsRegion}
+                                        onChange={(event) => setAWSRegion(event.target.value)}
+                                        maxLength={32}
+                                    />
+                                    <input
+                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                        placeholder="Instance type"
+                                        value={instanceType}
+                                        onChange={(event) => setInstanceType(event.target.value)}
+                                        maxLength={32}
+                                    />
+                                    <input
+                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                        placeholder="AMI ID"
+                                        value={amiID}
+                                        onChange={(event) => setAMIID(event.target.value)}
+                                        maxLength={32}
+                                    />
+                                    <input
+                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                        placeholder="EC2 key pair name (optional)"
+                                        value={keyName}
+                                        onChange={(event) => setKeyName(event.target.value)}
+                                        maxLength={64}
+                                    />
+                                </div>
+                            </article>
+                        ) : null}
                     </section>
                 </div>
             </main>

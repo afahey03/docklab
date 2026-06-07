@@ -52,6 +52,7 @@ frontend/                  # React + TypeScript + Tailwind dashboard
 - Structured JSON logging (`log/slog`)
 - Cloud drift/orphan reconciliation: background service marks stale provisioning states and timed-out operations as failed (runs every 5 minutes)
 - Auto-sleep lifecycle worker: automatically stops idle running environments after a configurable idle timeout; terminal sessions refresh activity timestamps every 60 s
+- Persisted cloud usage metadata (`cloud_instance_type`, `cloud_provisioned_at`) for dashboard cost estimation
 
 ## Local development
 
@@ -97,13 +98,14 @@ Frontend runs at `http://localhost:5173`.
 12. Long-running cloud actions run asynchronously; the dashboard tracks progress until completion.
 13. Operation status is persisted in PostgreSQL, so polling state survives backend restarts.
 14. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped to prevent resource waste.
+15. The dashboard Usage & Cost overview estimates EC2 runtime spend for provisioned environments using tracked runtime metadata and common on-demand rates.
 
 Terminal tips:
 - Copy selected terminal text with `Ctrl+Shift+C`.
 - Paste with `Ctrl+Shift+V`.
 - Use `Reconnect` in the terminal panel if the socket drops.
 
-Current available product flow includes authentication, local environment lifecycle management, browser terminal access, and Terraform-based EC2 provisioning.
+Current available product flow includes authentication, local environment lifecycle management, browser terminal access, Terraform-based EC2 provisioning, and estimated usage/cost visibility for provisioned cloud environments.
 
 Destructive actions are confirmed through in-app modal dialogs rather than browser alerts.
 
@@ -164,5 +166,6 @@ Then set the four `DOKLAB_TERRAFORM_STATE_*` variables above in your `.env`.
 4. Provision it with a valid AWS region, AMI, instance type, and credentials.
 5. Confirm the operation row advances from queued to running to succeeded.
 6. Verify the environment card updates with `provisioned`, instance ID, and public IP.
-7. Use `Terminate EC2` and confirm the cloud resources are removed while the environment remains.
-8. Use `Delete` and confirm both the environment row and EC2 resources are removed.
+7. Verify the Usage & Cost overview shows the provisioned environment and a non-zero monthly rate estimate for supported instance types.
+8. Use `Terminate EC2` and confirm the cloud resources are removed while the environment remains.
+9. Use `Delete` and confirm both the environment row and EC2 resources are removed.

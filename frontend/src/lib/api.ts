@@ -25,10 +25,13 @@ export type Environment = {
     container_id: string;
     cloud_status: string;
     cloud_region: string;
+    cloud_instance_type: string;
     instance_id: string;
     public_ip: string;
     terraform_dir: string;
     cloud_error: string;
+    cloud_provisioned_at: string | null;
+    last_activity_at: string;
     created_at: string;
     updated_at: string;
 };

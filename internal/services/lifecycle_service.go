@@ -15,18 +15,18 @@ const (
 
 // LifecycleService runs a background worker that automatically stops running environments
 // that have been idle (no terminal activity) for longer than the configured threshold.
-// Cloud resources (EC2 instances) are left untouched; only the local Docker container is
+// Cloud resources (EC2 instances) are left untouched; only the workspace container is
 // stopped. Users can restart the environment from the dashboard at any time.
 type LifecycleService struct {
 	environmentRepo repositories.EnvironmentRepository
-	runtime         ContainerRuntime
+	resolver        *RuntimeResolver
 	idleThreshold   time.Duration
 	log             *slog.Logger
 }
 
 func NewLifecycleService(
 	environmentRepo repositories.EnvironmentRepository,
-	runtime ContainerRuntime,
+	resolver *RuntimeResolver,
 	idleStopMinutes int,
 	log *slog.Logger,
 ) *LifecycleService {
@@ -35,7 +35,7 @@ func NewLifecycleService(
 	}
 	return &LifecycleService{
 		environmentRepo: environmentRepo,
-		runtime:         runtime,
+		resolver:        resolver,
 		idleThreshold:   time.Duration(idleStopMinutes) * time.Minute,
 		log:             log,
 	}
@@ -88,11 +88,21 @@ func (s *LifecycleService) stopIdleEnvironments(ctx context.Context) {
 		s.log.Info("lifecycle: stopping idle environment",
 			"environment_id", env.ID,
 			"user_email", env.UserEmail,
+			"runtime_target", env.RuntimeTarget,
 			"last_activity_at", env.LastActivityAt,
 		)
 
+		runtime, err := s.resolver.ForEnvironment(&env)
+		if err != nil {
+			s.log.Error("lifecycle: failed to resolve runtime",
+				"environment_id", env.ID,
+				"error", err,
+			)
+			continue
+		}
+
 		stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := s.runtime.StopWorkspace(stopCtx, env.ContainerID)
+		err = runtime.StopWorkspace(stopCtx, env.ContainerID)
 		cancel()
 
 		if err != nil {

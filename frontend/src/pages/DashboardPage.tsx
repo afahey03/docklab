@@ -7,6 +7,8 @@ import {
     createEnvironment,
     destroyCloudEnvironment,
     deleteEnvironment,
+    retryRemoteBootstrap,
+    getRemoteHealth,
     getEnvironments,
     getMe,
     getOperation,
@@ -15,10 +17,12 @@ import {
     stopEnvironment,
     type Environment,
     type Operation,
+    type RemoteHealthStatus,
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
+import { getEnvironmentCapabilities } from "../lib/environmentCapabilities";
 
-type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud";
+type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud" | "retry_bootstrap";
 type ConfirmAction = "delete_environment" | "destroy_cloud";
 type DashboardView = "environments" | "usage" | "settings";
 
@@ -155,6 +159,7 @@ export function DashboardPage() {
     });
     const [activeTerminalEnvironmentId, setActiveTerminalEnvironmentId] = useState("");
     const [terminalConnected, setTerminalConnected] = useState(false);
+    const [remoteHealthByEnvironment, setRemoteHealthByEnvironment] = useState<Record<string, RemoteHealthStatus | undefined>>({});
     const terminalContainerRef = useRef<HTMLDivElement | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const xtermRef = useRef<Terminal | null>(null);
@@ -633,6 +638,15 @@ export function DashboardPage() {
             setError("AMI ID is required");
             return;
         }
+        if (!keyName.trim()) {
+            setError("EC2 key pair name is required for remote SSH access");
+            return;
+        }
+
+        const normalizedKeyName = keyName.trim().replace(/\.pem$/i, "");
+        if (normalizedKeyName !== keyName.trim()) {
+            setNotice("Using EC2 key pair name without .pem extension.");
+        }
 
         setEnvironmentPendingAction(id, "provision");
         try {
@@ -640,13 +654,56 @@ export function DashboardPage() {
                 region: awsRegion.trim(),
                 instance_type: instanceType.trim(),
                 ami: amiID.trim(),
-                key_name: keyName.trim(),
+                key_name: normalizedKeyName,
             });
             await waitForOperation(operation, "provisioning finished");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to provision environment");
         } finally {
             setEnvironmentPendingAction(id);
+        }
+    }
+
+    async function handleRetryRemoteBootstrap(id: string) {
+        setError("");
+        setNotice("");
+        setEnvironmentPendingAction(id, "retry_bootstrap");
+        try {
+            const operation = await retryRemoteBootstrap(id);
+            await waitForOperation(operation, "remote workspace setup finished");
+            await refreshEnvironments();
+        } catch (requestError) {
+            setError(requestError instanceof Error ? requestError.message : "failed to complete remote bootstrap");
+        } finally {
+            setEnvironmentPendingAction(id);
+        }
+    }
+
+    function cloudStatusBadgeClass(cloudStatus: string): string {
+        switch (cloudStatus) {
+            case "provisioned":
+                return "border-emerald-700 text-emerald-300";
+            case "provisioning":
+            case "deprovisioning":
+                return "border-amber-700 text-amber-300";
+            case "provision_failed":
+                return "border-rose-700 text-rose-300";
+            default:
+                return "border-slate-700 text-slate-300";
+        }
+    }
+
+    function workspaceStatusBadgeClass(status: string): string {
+        return status === "running" ? "border-cyan-700 text-cyan-300" : "border-slate-700 text-slate-300";
+    }
+
+    async function handleCheckRemoteHealth(id: string) {
+        setError("");
+        try {
+            const health = await getRemoteHealth(id);
+            setRemoteHealthByEnvironment((current) => ({ ...current, [id]: health }));
+        } catch (requestError) {
+            setError(requestError instanceof Error ? requestError.message : "failed to check remote health");
         }
     }
 
@@ -760,13 +817,19 @@ export function DashboardPage() {
                                         <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
                                     ) : (
                                         <div className="mt-3 space-y-3">
-                                            {environmentUsage.map(({ environment: env }) => (
+                                            {environmentUsage.map(({ environment: env }) => {
+                                                const capabilities = getEnvironmentCapabilities(env, isEnvironmentPending(env.id));
+                                                const remoteHealth = remoteHealthByEnvironment[env.id];
+
+                                                return (
                                                 <div key={env.id} className="rounded-md border border-slate-800 bg-slate-950 p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                                         <div>
                                                             <p className="font-medium text-slate-100">{env.name}</p>
                                                             <p className="text-xs text-slate-400">{env.image}</p>
                                                             <p className="text-xs text-slate-500">
+                                                                Runtime: {env.runtime_target || "local"}
+                                                                {" | "}
                                                                 Cloud: {env.cloud_status || "not_provisioned"}
                                                                 {env.public_ip ? ` | IP: ${env.public_ip}` : ""}
                                                             </p>
@@ -779,17 +842,39 @@ export function DashboardPage() {
                                                             {env.cloud_error ? (
                                                                 <p className="text-xs text-rose-400">{env.cloud_error}</p>
                                                             ) : null}
+                                                            {remoteHealth ? (
+                                                                <p className="text-xs text-slate-500">
+                                                                    Remote health: SSH {remoteHealth.ssh_reachable ? "ok" : "down"}
+                                                                    {" | "}
+                                                                    Docker {remoteHealth.docker_available ? "ok" : "down"}
+                                                                    {" | "}
+                                                                    Workspace {remoteHealth.workspace_ready ? "ok" : "down"}
+                                                                    {remoteHealth.error ? ` — ${remoteHealth.error}` : ""}
+                                                                </p>
+                                                            ) : null}
+                                                            {capabilities.showRemoteBootstrapHint ? (
+                                                                <p className="text-xs text-amber-400">
+                                                                    EC2 is provisioned but the remote workspace is not attached yet.
+                                                                </p>
+                                                            ) : null}
                                                         </div>
-                                                        <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
-                                                            {env.status}
-                                                        </span>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <span className={`rounded-full border px-2 py-1 text-xs ${workspaceStatusBadgeClass(capabilities.workspaceStatusLabel)}`}>
+                                                                workspace: {capabilities.workspaceStatusLabel}
+                                                            </span>
+                                                            {env.instance_id ? (
+                                                                <span className={`rounded-full border px-2 py-1 text-xs ${cloudStatusBadgeClass(capabilities.cloudStatusLabel)}`}>
+                                                                    cloud: {capabilities.cloudStatusLabel}
+                                                                </span>
+                                                            ) : null}
+                                                        </div>
                                                     </div>
 
                                                     <div className="mt-3 flex flex-wrap gap-2">
                                                         <button
                                                             className="rounded-md border border-emerald-700 px-3 py-1 text-xs text-emerald-300 hover:bg-emerald-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={isEnvironmentPending(env.id) || env.status === "running"}
+                                                            disabled={!capabilities.canStart}
                                                             onClick={() => handleStartEnvironment(env.id)}
                                                         >
                                                             {isEnvironmentActionPending(env.id, "start") ? "Starting..." : "Start"}
@@ -797,7 +882,7 @@ export function DashboardPage() {
                                                         <button
                                                             className="rounded-md border border-amber-700 px-3 py-1 text-xs text-amber-300 hover:bg-amber-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={isEnvironmentPending(env.id) || env.status !== "running"}
+                                                            disabled={!capabilities.canStop}
                                                             onClick={() => handleStopEnvironment(env.id)}
                                                         >
                                                             {isEnvironmentActionPending(env.id, "stop") ? "Stopping..." : "Stop"}
@@ -805,7 +890,7 @@ export function DashboardPage() {
                                                         <button
                                                             className="rounded-md border border-rose-700 px-3 py-1 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={isEnvironmentPending(env.id)}
+                                                            disabled={!capabilities.canDelete}
                                                             onClick={() => promptDeleteEnvironment(env.id)}
                                                         >
                                                             {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
@@ -813,10 +898,7 @@ export function DashboardPage() {
                                                         <button
                                                             className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={
-                                                                isEnvironmentPending(env.id)
-                                                                || (!env.instance_id && !env.terraform_dir && env.cloud_status !== "provisioned")
-                                                            }
+                                                            disabled={!capabilities.canTerminateEC2}
                                                             onClick={() => promptDestroyCloudEnvironment(env.id)}
                                                         >
                                                             {isEnvironmentActionPending(env.id, "destroy_cloud") ? "Terminating..." : "Terminate EC2"}
@@ -824,11 +906,7 @@ export function DashboardPage() {
                                                         <button
                                                             className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={
-                                                                env.status !== "running"
-                                                                || isEnvironmentPending(env.id)
-                                                                || activeTerminalEnvironmentId === env.id
-                                                            }
+                                                            disabled={!capabilities.canOpenTerminal || activeTerminalEnvironmentId === env.id}
                                                             onClick={() => openTerminal(env.id)}
                                                         >
                                                             {activeTerminalEnvironmentId === env.id ? "Terminal open" : "Terminal"}
@@ -836,18 +914,39 @@ export function DashboardPage() {
                                                         <button
                                                             className="rounded-md border border-indigo-700 px-3 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
-                                                            disabled={isEnvironmentPending(env.id) || env.cloud_status === "provisioned"}
+                                                            disabled={!capabilities.canProvision}
                                                             onClick={() => handleProvisionEnvironment(env.id)}
                                                         >
-                                                            {env.cloud_status === "provisioned"
-                                                                ? "Provisioned"
-                                                                : isEnvironmentActionPending(env.id, "provision")
-                                                                    ? "Provisioning..."
-                                                                    : "Provision"}
+                                                            {isEnvironmentActionPending(env.id, "provision")
+                                                                ? "Provisioning..."
+                                                                : capabilities.provisionLabel}
                                                         </button>
+                                                        {capabilities.canRepairRemoteWorkspace ? (
+                                                            <button
+                                                                className="rounded-md border border-amber-600 px-3 py-1 text-xs text-amber-300 hover:bg-amber-950 disabled:cursor-not-allowed disabled:opacity-50"
+                                                                type="button"
+                                                                disabled={isEnvironmentPending(env.id)}
+                                                                onClick={() => void handleRetryRemoteBootstrap(env.id)}
+                                                            >
+                                                                {isEnvironmentActionPending(env.id, "retry_bootstrap")
+                                                                    ? "Setting up remote..."
+                                                                    : capabilities.repairRemoteLabel}
+                                                            </button>
+                                                        ) : null}
+                                                        {capabilities.canCheckRemoteHealth ? (
+                                                            <button
+                                                                className="rounded-md border border-slate-600 px-3 py-1 text-xs text-slate-300 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                                                                type="button"
+                                                                disabled={isEnvironmentPending(env.id)}
+                                                                onClick={() => void handleCheckRemoteHealth(env.id)}
+                                                            >
+                                                                Check remote health
+                                                            </button>
+                                                        ) : null}
                                                     </div>
                                                 </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     )}
                                 </article>
@@ -983,7 +1082,9 @@ export function DashboardPage() {
                             <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                                 <h3 className="font-medium">Cloud provisioning defaults</h3>
                                 <p className="mt-1 text-sm text-slate-400">
-                                    Used when you click Provision on an environment.
+                                    Used when you click Provision on an environment. The key pair name is the name registered in AWS EC2
+                                    (for example, <code className="text-slate-300">docklab-key</code>), not your local{" "}
+                                    <code className="text-slate-300">.pem</code> file path.
                                 </p>
 
                                 <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -1010,7 +1111,7 @@ export function DashboardPage() {
                                     />
                                     <input
                                         className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                        placeholder="EC2 key pair name (optional)"
+                                        placeholder="EC2 key pair name (e.g. docklab-key)"
                                         value={keyName}
                                         onChange={(event) => setKeyName(event.target.value)}
                                         maxLength={64}

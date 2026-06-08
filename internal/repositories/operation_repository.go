@@ -17,6 +17,8 @@ type OperationRepository interface {
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Operation, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status, errorMessage string) (*models.Operation, error)
 	ExistsInProgressForEnvironment(ctx context.Context, environmentID, userEmail string) (bool, error)
+	FailStaleInProgressForEnvironment(ctx context.Context, environmentID, userEmail string, olderThan time.Duration) (int64, error)
+	FailInProgressForEnvironment(ctx context.Context, environmentID, userEmail, reason string) (int64, error)
 
 	// Reconciliation: marks queued/running operations older than olderThan as failed.
 	MarkStaleAsFailed(ctx context.Context, olderThan time.Duration) (int64, error)
@@ -145,6 +147,50 @@ func (r *PostgresOperationRepository) ExistsInProgressForEnvironment(ctx context
 	}
 
 	return exists, nil
+}
+
+func (r *PostgresOperationRepository) FailStaleInProgressForEnvironment(ctx context.Context, environmentID, userEmail string, olderThan time.Duration) (int64, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	cutoff := time.Now().Add(-olderThan)
+	const query = `
+		UPDATE operations
+		SET status = 'failed',
+		    error = 'operation timed out: exceeded maximum allowed duration for this environment',
+		    updated_at = NOW()
+		WHERE environment_id = $1
+		  AND user_email = $2
+		  AND status IN ('queued', 'running')
+		  AND updated_at < $3`
+
+	result, err := r.db.Exec(ctx, query, environmentID, userEmail, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+func (r *PostgresOperationRepository) FailInProgressForEnvironment(ctx context.Context, environmentID, userEmail, reason string) (int64, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	const query = `
+		UPDATE operations
+		SET status = 'failed',
+		    error = $3,
+		    updated_at = NOW()
+		WHERE environment_id = $1
+		  AND user_email = $2
+		  AND status IN ('queued', 'running')`
+
+	result, err := r.db.Exec(ctx, query, environmentID, userEmail, reason)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 // MarkStaleAsFailed transitions any operations stuck in queued or running for longer than

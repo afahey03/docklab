@@ -20,10 +20,19 @@ services:
       DOKLAB_TERRAFORM_STATE_TABLE: ${DOKLAB_TERRAFORM_STATE_TABLE:-}
       DOKLAB_TERRAFORM_STATE_KEY_PREFIX: ${DOKLAB_TERRAFORM_STATE_KEY_PREFIX:-docklab/environments}
       IDLE_STOP_AFTER_MINUTES: ${IDLE_STOP_AFTER_MINUTES:-60}
+      DOKLAB_SSH_PRIVATE_KEY_PATH: ${DOKLAB_SSH_PRIVATE_KEY_PATH:-/run/secrets/docklab-ssh-key.pem}
+      DOKLAB_SSH_USER: ${DOKLAB_SSH_USER:-ec2-user}
+      DOKLAB_SSH_PORT: ${DOKLAB_SSH_PORT:-22}
+      DOKLAB_SSH_CONNECT_TIMEOUT_SECONDS: ${DOKLAB_SSH_CONNECT_TIMEOUT_SECONDS:-15}
+      DOKLAB_REMOTE_BOOTSTRAP_TIMEOUT_SECONDS: ${DOKLAB_REMOTE_BOOTSTRAP_TIMEOUT_SECONDS:-300}
     ports:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: ${DOKLAB_SSH_PRIVATE_KEY_HOST_PATH:-./docklab-key.pem}
+        target: /run/secrets/docklab-ssh-key.pem
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy

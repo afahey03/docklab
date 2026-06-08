@@ -125,25 +125,27 @@ Give users visibility into cloud runtime and estimated EC2 spend; establish auto
 
 ---
 
-## Sprint 7 🔲 Remote Container Orchestration
+## Sprint 7 ✅ Remote Container Orchestration
 
 ### Goal
-Make provisioned EC2 instances usable as actual remote development workspaces — the critical gap for product viability.
+Make provisioned EC2 instances usable as actual remote development workspaces.
 
-### Scope
-- SSH client and key/credential handling for provisioned instances
-- Remote Docker installation/bootstrap on EC2 (user-data script or post-provision setup)
-- Remote container create/start/stop/delete over SSH
-- Route browser terminal sessions to remote containers when cloud is provisioned
-- Health checks: verify EC2 reachability and remote Docker daemon status
-- Update environment model to distinguish local vs remote runtime target
+### Delivered
+- SSH client (`golang.org/x/crypto/ssh`) with configurable user, port, and private key path
+- Terraform EC2 template: security group (SSH ingress), Docker install user-data, public IP
+- `SSHDockerRuntime`: remote container create/start/stop/delete over SSH
+- `RuntimeResolver`: routes lifecycle and terminal to local or remote based on `runtime_target`
+- Post-provision bootstrap: wait for SSH + Docker, create remote workspace, remove local container, set `runtime_target = remote`
+- Remote browser terminal: SSH PTY session running `docker exec` on EC2
+- `GET /api/v1/environments/:id/remote-health` — SSH reachability and Docker daemon checks
+- Environment model: `runtime_target`, `cloud_key_name` columns
+- Destroy-cloud flow reverts workspace to local Docker before tearing down EC2
+- Dashboard: runtime target display, required key pair for provision, **Check remote health** button
+- Idle auto-stop works for remote containers (EC2 instance still left running — Sprint 8)
 
-### Definition of Done
-- After provisioning EC2, a user can start a workspace on the remote machine and open a browser terminal connected to it.
+### Definition of Done — Met
+- After provisioning EC2, a user can open a browser terminal connected to the remote workspace container.
 - Local-only flow continues to work when cloud is not provisioned.
-
-### Why this matters
-Today, EC2 provisioning is infrastructure-only. Without this sprint, DockLab cannot deliver on its core promise of cloud-based remote development.
 
 ---
 
@@ -212,7 +214,7 @@ Turn cost estimates into durable, auditable usage data.
 | 4 | ✅ Done | Terraform EC2 provisioning |
 | 5 | ✅ Done | Local auto-sleep |
 | 6 | ✅ Done | Cost visibility + CI |
-| 7 | 🔲 Next | Remote orchestration |
-| 8 | 🔲 Planned | Cloud lifecycle automation |
+| 7 | ✅ Done | Remote orchestration |
+| 8 | 🔲 Next | Cloud lifecycle automation |
 | 9 | 🔲 Planned | Production hardening + deployment |
 | 10 | 🔲 Stretch | Durable cost tracking |

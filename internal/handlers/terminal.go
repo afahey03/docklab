@@ -59,6 +59,10 @@ func (h *TerminalHandler) sendTerminalError(ws *websocket.Conn, err error) {
 		_ = ws.WriteMessage(websocket.TextMessage, []byte("\r\n[docklab] environment is not running\r\n"))
 	case errors.Is(err, services.ErrDockerUnavailable):
 		_ = ws.WriteMessage(websocket.TextMessage, []byte("\r\n[docklab] docker CLI is not installed or unavailable\r\n"))
+	case errors.Is(err, services.ErrSSHPrivateKeyMissing):
+		_ = ws.WriteMessage(websocket.TextMessage, []byte("\r\n[docklab] SSH private key is not configured on the server\r\n"))
+	case errors.Is(err, services.ErrSSHConnectionFailed):
+		_ = ws.WriteMessage(websocket.TextMessage, []byte("\r\n[docklab] failed to connect to remote host over SSH\r\n"))
 	default:
 		_ = ws.WriteMessage(websocket.TextMessage, []byte("\r\n[docklab] terminal session ended with an error\r\n"))
 	}

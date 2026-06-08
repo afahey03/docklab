@@ -42,9 +42,11 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 			image TEXT NOT NULL,
 			status TEXT NOT NULL,
 			container_id TEXT NOT NULL UNIQUE,
+			runtime_target TEXT NOT NULL DEFAULT 'local',
 			cloud_status TEXT NOT NULL DEFAULT 'not_provisioned',
 			cloud_region TEXT NOT NULL DEFAULT '',
 			cloud_instance_type TEXT NOT NULL DEFAULT '',
+			cloud_key_name TEXT NOT NULL DEFAULT '',
 			instance_id TEXT NOT NULL DEFAULT '',
 			public_ip TEXT NOT NULL DEFAULT '',
 			terraform_dir TEXT NOT NULL DEFAULT '',
@@ -110,6 +112,15 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 
 	if _, err := pool.Exec(ctx, activityColumns); err != nil {
 		return fmt.Errorf("failed to ensure last_activity_at column: %w", err)
+	}
+
+	const remoteRuntimeColumns = `
+		ALTER TABLE environments ADD COLUMN IF NOT EXISTS runtime_target TEXT NOT NULL DEFAULT 'local';
+		ALTER TABLE environments ADD COLUMN IF NOT EXISTS cloud_key_name TEXT NOT NULL DEFAULT '';
+	`
+
+	if _, err := pool.Exec(ctx, remoteRuntimeColumns); err != nil {
+		return fmt.Errorf("failed to ensure remote runtime columns: %w", err)
 	}
 
 	return nil

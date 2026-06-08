@@ -105,28 +105,8 @@ func (r *TerraformCLIRunner) ProvisionEC2(ctx context.Context, environmentID str
 		}
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(terraformMainTemplate), 0o644); err != nil {
-		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform main.tf: %w", err)}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "backend.tf"), []byte(terraformBackendTemplate), 0o644); err != nil {
-		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform backend.tf: %w", err)}
-	}
-	if err := writeTerraformBackendMarker(dir, backendConfig); err != nil {
+	if err := writeTerraformWorkspace(dir, backendConfig, environmentID, req); err != nil {
 		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: err}
-	}
-
-	vars := map[string]string{
-		"aws_region":    req.Region,
-		"instance_type": req.InstanceType,
-		"ami_id":        req.AMI,
-		"key_name":      req.KeyName,
-	}
-	varBytes, err := json.Marshal(vars)
-	if err != nil {
-		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to marshal terraform vars: %w", err)}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "terraform.tfvars.json"), varBytes, 0o644); err != nil {
-		return nil, &TerraformWorkspaceError{TerraformDir: dir, Err: fmt.Errorf("failed to write terraform tfvars: %w", err)}
 	}
 
 	if err := runTerraform(ctx, dir, terraformInitArgs(backendConfig)...); err != nil {
@@ -177,6 +157,15 @@ func (r *TerraformCLIRunner) DestroyEC2(ctx context.Context, environmentID, terr
 
 	_, initArgs, err := loadTerraformDestroyConfig(environmentID, terraformDir)
 	if err != nil {
+		return err
+	}
+
+	cfg, err := loadTerraformBackendConfig(environmentID)
+	if err != nil {
+		return err
+	}
+	req := loadTerraformVarsFromDir(terraformDir)
+	if err := writeTerraformWorkspace(terraformDir, cfg, environmentID, req); err != nil {
 		return err
 	}
 
@@ -343,6 +332,68 @@ func parseTerraformOutputs(raw string) (string, string, error) {
 	return instanceID, publicIP, nil
 }
 
+func writeTerraformWorkspace(dir string, backendConfig terraformBackendConfig, environmentID string, req ProvisionRequest) error {
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(terraformMainTemplate), 0o644); err != nil {
+		return fmt.Errorf("failed to write terraform main.tf: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backend.tf"), []byte(terraformBackendTemplate), 0o644); err != nil {
+		return fmt.Errorf("failed to write terraform backend.tf: %w", err)
+	}
+	if err := writeTerraformBackendMarker(dir, backendConfig); err != nil {
+		return err
+	}
+
+	req = normalizeProvisionRequest(req)
+	vars := map[string]string{
+		"aws_region":     req.Region,
+		"instance_type":  req.InstanceType,
+		"ami_id":         req.AMI,
+		"key_name":       req.KeyName,
+		"environment_id": environmentID,
+	}
+	varBytes, err := json.Marshal(vars)
+	if err != nil {
+		return fmt.Errorf("failed to marshal terraform vars: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "terraform.tfvars.json"), varBytes, 0o644); err != nil {
+		return fmt.Errorf("failed to write terraform tfvars: %w", err)
+	}
+
+	return nil
+}
+
+func loadTerraformVarsFromDir(dir string) ProvisionRequest {
+	req := ProvisionRequest{}
+	data, err := os.ReadFile(filepath.Join(dir, "terraform.tfvars.json"))
+	if err != nil {
+		return req
+	}
+
+	var vars map[string]string
+	if err := json.Unmarshal(data, &vars); err != nil {
+		return req
+	}
+
+	req.Region = vars["aws_region"]
+	req.InstanceType = vars["instance_type"]
+	req.AMI = vars["ami_id"]
+	req.KeyName = vars["key_name"]
+	return req
+}
+
+func normalizeProvisionRequest(req ProvisionRequest) ProvisionRequest {
+	if req.Region == "" {
+		req.Region = "us-east-1"
+	}
+	if req.InstanceType == "" {
+		req.InstanceType = "t3.micro"
+	}
+	if req.AMI == "" {
+		req.AMI = "ami-0c2b8ca1dad447f8a"
+	}
+	return req
+}
+
 const terraformBackendTemplate = `
 terraform {
 	required_version = ">= 1.5.0"
@@ -381,13 +432,72 @@ variable "key_name" {
   type = string
 }
 
-resource "aws_instance" "docklab" {
-  ami           = var.ami_id
-  instance_type = var.instance_type
-  key_name      = var.key_name != "" ? var.key_name : null
+variable "environment_id" {
+  type = string
+}
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+resource "aws_security_group" "docklab" {
+  name        = "docklab-${var.environment_id}"
+  description = "DockLab workspace SSH access for ${var.environment_id}"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   tags = {
-    Name = "docklab-workspace"
+    Name         = "docklab-workspace-sg"
+    DockLabEnvID = var.environment_id
+  }
+}
+
+resource "aws_instance" "docklab" {
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  key_name                    = var.key_name != "" ? var.key_name : null
+  vpc_security_group_ids      = [aws_security_group.docklab.id]
+  associate_public_ip_address = true
+
+  user_data = <<-EOF
+              #!/bin/bash
+              set -euxo pipefail
+              if command -v dnf >/dev/null 2>&1; then
+                dnf install -y docker
+                systemctl enable docker
+                systemctl start docker
+                usermod -aG docker ec2-user
+              elif command -v yum >/dev/null 2>&1; then
+                yum install -y docker
+                systemctl enable docker
+                systemctl start docker
+                usermod -aG docker ec2-user
+              elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                apt-get install -y docker.io
+                systemctl enable docker
+                systemctl start docker
+                usermod -aG docker ubuntu
+              fi
+              EOF
+
+  tags = {
+    Name         = "docklab-workspace"
+    DockLabEnvID = var.environment_id
   }
 }
 

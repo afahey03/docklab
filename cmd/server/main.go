@@ -40,9 +40,10 @@ func main() {
 	environmentRepo := repositories.NewPostgresEnvironmentRepository(dbPool)
 	operationRepo := repositories.NewPostgresOperationRepository(dbPool)
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTLMinutes)
-	dockerRuntime := services.NewDockerCLIRuntime()
-	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, dockerRuntime)
-	terminalService := services.NewTerminalService(environmentRepo)
+	localRuntime := services.NewDockerCLIRuntime()
+	runtimeResolver := services.NewRuntimeResolver(localRuntime, cfg)
+	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, runtimeResolver)
+	terminalService := services.NewTerminalService(environmentRepo, runtimeResolver)
 	authHandler := handlers.NewAuthHandler(authService)
 	environmentHandler := handlers.NewEnvironmentHandler(environmentService)
 	terminalHandler := handlers.NewTerminalHandler(authService, terminalService)
@@ -57,7 +58,7 @@ func main() {
 	reconciler.Start(bgCtx)
 
 	// Sprint 5: auto-sleep idle environments.
-	lifecycle := services.NewLifecycleService(environmentRepo, dockerRuntime, cfg.IdleStopMinutes, logr)
+	lifecycle := services.NewLifecycleService(environmentRepo, runtimeResolver, cfg.IdleStopMinutes, logr)
 	lifecycle.Start(bgCtx)
 
 	router := gin.New()
@@ -88,6 +89,8 @@ func main() {
 	protected.POST("/environments", environmentHandler.Create)
 	protected.GET("/environments", environmentHandler.List)
 	protected.GET("/environments/:id", environmentHandler.Get)
+	protected.POST("/environments/:id/retry-bootstrap", environmentHandler.RetryRemoteBootstrap)
+	protected.GET("/environments/:id/remote-health", environmentHandler.GetRemoteHealth)
 	protected.GET("/operations/:id", environmentHandler.GetOperation)
 	protected.POST("/environments/:id/start", environmentHandler.Start)
 	protected.POST("/environments/:id/stop", environmentHandler.Stop)

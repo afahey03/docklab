@@ -27,16 +27,20 @@ const (
 	opTypeProvision         = "provision"
 	opTypeDestroyCloud      = "destroy_cloud"
 	opTypeDeleteEnvironment = "delete_environment"
+	opTypeRetryBootstrap    = "retry_bootstrap"
 	opStatusQueued          = "queued"
 	opStatusRunning         = "running"
 	opStatusSucceeded       = "succeeded"
 	opStatusFailed          = "failed"
 )
 
+const staleEnvironmentOperationThreshold = 10 * time.Minute
+
 var ErrDockerUnavailable = errors.New("docker CLI is not installed or unavailable")
 var ErrProvisionInProgress = errors.New("provisioning is already in progress for this environment")
 var ErrOperationNotFound = errors.New("operation not found")
 var ErrOperationInProgress = errors.New("another long-running operation is already in progress for this environment")
+var ErrCloudAlreadyProvisioned = errors.New("environment already has cloud resources; terminate EC2 before reprovisioning")
 
 type ProvisionValidationError struct {
 	Code    string
@@ -125,17 +129,158 @@ func (d *DockerCLIRuntime) DeleteWorkspace(ctx context.Context, containerID stri
 type EnvironmentService struct {
 	repo            repositories.EnvironmentRepository
 	operationRepo   repositories.OperationRepository
-	runtime         ContainerRuntime
+	resolver        *RuntimeResolver
+	bootstrap       *RemoteBootstrapService
 	terraformRunner TerraformRunner
 }
 
-func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRepo repositories.OperationRepository, runtime ContainerRuntime) *EnvironmentService {
+func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRepo repositories.OperationRepository, resolver *RuntimeResolver) *EnvironmentService {
 	return &EnvironmentService{
 		repo:            repo,
 		operationRepo:   operationRepo,
-		runtime:         runtime,
+		resolver:        resolver,
+		bootstrap:       NewRemoteBootstrapService(resolver),
 		terraformRunner: NewTerraformCLIRunner(),
 	}
+}
+
+func (s *EnvironmentService) GetRemoteHealth(ctx context.Context, id, userEmail string) (RemoteHealthStatus, error) {
+	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
+	if err != nil {
+		return RemoteHealthStatus{}, err
+	}
+	return s.bootstrap.CheckHealth(ctx, env), nil
+}
+
+func (s *EnvironmentService) runtimeFor(env *models.Environment) (ContainerRuntime, error) {
+	return s.resolver.ForEnvironment(env)
+}
+
+func hasExistingCloudResources(env *models.Environment) bool {
+	if env == nil {
+		return false
+	}
+	if env.InstanceID != "" || env.TerraformDir != "" {
+		return true
+	}
+	switch env.CloudStatus {
+	case cloudProvisioned, cloudProvisioning, cloudDeprovisioning:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *EnvironmentService) QueueRetryRemoteBootstrap(ctx context.Context, id, userEmail string) (*models.Operation, error) {
+	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if env.PublicIP == "" || env.InstanceID == "" {
+		return nil, &ProvisionValidationError{Code: "remote_bootstrap_unavailable", Message: "environment has no provisioned EC2 instance to bootstrap"}
+	}
+	needsBootstrap := env.RuntimeTarget != runtimeTargetRemote
+	needsReconcile := env.RuntimeTarget == runtimeTargetRemote && (env.CloudStatus != cloudProvisioned || env.CloudError != "")
+	if !needsBootstrap && !needsReconcile {
+		return nil, &ProvisionValidationError{Code: "remote_bootstrap_unavailable", Message: "remote workspace is already configured"}
+	}
+
+	_, _ = s.operationRepo.FailInProgressForEnvironment(ctx, env.ID, userEmail, "superseded by remote bootstrap retry")
+	s.clearStaleOperations(ctx, env.ID, userEmail)
+
+	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if hasInProgress {
+		return nil, ErrOperationInProgress
+	}
+
+	return s.queueOperation(ctx, userEmail, env.ID, opTypeRetryBootstrap, func() error {
+		_, bootstrapErr := s.completeRemoteBootstrap(context.Background(), env.ID, userEmail)
+		return bootstrapErr
+	})
+}
+
+func (s *EnvironmentService) completeRemoteBootstrap(ctx context.Context, id, userEmail string) (*models.Environment, error) {
+	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
+	if err != nil {
+		return nil, err
+	}
+	if env.PublicIP == "" || env.InstanceID == "" {
+		return nil, fmt.Errorf("environment has no provisioned EC2 instance")
+	}
+
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(ctx, s.resolver.BootstrapTimeout())
+	defer bootstrapCancel()
+
+	remoteContainerID, bootstrapErr := s.bootstrap.BootstrapAfterProvision(bootstrapCtx, env)
+	if bootstrapErr != nil {
+		if env.RuntimeTarget != runtimeTargetRemote {
+			failedEnv, updateErr := s.repo.UpdateProvisioning(
+				ctx,
+				env.ID,
+				userEmail,
+				cloudProvisionFailed,
+				env.CloudRegion,
+				env.CloudInstanceType,
+				env.CloudKeyName,
+				env.InstanceID,
+				env.PublicIP,
+				env.TerraformDir,
+				fmt.Sprintf("remote bootstrap failed: %v", bootstrapErr),
+				env.CloudProvisionedAt,
+			)
+			if updateErr == nil {
+				return failedEnv, bootstrapErr
+			}
+		}
+		return nil, bootstrapErr
+	}
+
+	var updatedEnv *models.Environment
+	if env.RuntimeTarget != runtimeTargetRemote {
+		localContainerID := env.ContainerID
+		updatedEnv, err = s.repo.UpdateRuntime(ctx, env.ID, userEmail, runtimeTargetRemote, remoteContainerID, statusRunning)
+		if err != nil {
+			return nil, err
+		}
+		if localContainerID != "" {
+			_ = s.resolver.LocalRuntime().DeleteWorkspace(ctx, localContainerID)
+		}
+	} else if remoteContainerID != "" && remoteContainerID != env.ContainerID {
+		updatedEnv, err = s.repo.UpdateRuntime(ctx, env.ID, userEmail, runtimeTargetRemote, remoteContainerID, statusRunning)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		updatedEnv = env
+	}
+
+	cloudProvisionedAt := env.CloudProvisionedAt
+	if cloudProvisionedAt == nil {
+		now := time.Now().UTC()
+		cloudProvisionedAt = &now
+	}
+	provisionedEnv, err := s.repo.UpdateProvisioning(
+		ctx,
+		env.ID,
+		userEmail,
+		cloudProvisioned,
+		env.CloudRegion,
+		env.CloudInstanceType,
+		env.CloudKeyName,
+		env.InstanceID,
+		env.PublicIP,
+		env.TerraformDir,
+		"",
+		cloudProvisionedAt,
+	)
+	if err != nil {
+		return updatedEnv, err
+	}
+
+	return provisionedEnv, nil
 }
 
 func (s *EnvironmentService) QueueProvisionEnvironment(ctx context.Context, id, userEmail string, req ProvisionRequest) (*models.Operation, error) {
@@ -151,6 +296,10 @@ func (s *EnvironmentService) QueueProvisionEnvironment(ctx context.Context, id, 
 	if env.CloudStatus == cloudProvisioning {
 		return nil, ErrProvisionInProgress
 	}
+	if hasExistingCloudResources(env) {
+		return nil, ErrCloudAlreadyProvisioned
+	}
+	s.clearStaleOperations(ctx, env.ID, userEmail)
 	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
 	if err != nil {
 		return nil, err
@@ -170,6 +319,7 @@ func (s *EnvironmentService) QueueDestroyCloudEnvironment(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
+	s.clearBlockingOperations(ctx, env)
 	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
 	if err != nil {
 		return nil, err
@@ -178,7 +328,7 @@ func (s *EnvironmentService) QueueDestroyCloudEnvironment(ctx context.Context, i
 		return nil, ErrOperationInProgress
 	}
 	if shouldDestroyCloudResources(env) {
-		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.CloudInstanceType, env.InstanceID, env.PublicIP, env.TerraformDir, "", env.CloudProvisionedAt)
+		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.CloudInstanceType, env.CloudKeyName, env.InstanceID, env.PublicIP, env.TerraformDir, "", env.CloudProvisionedAt)
 	}
 
 	return s.queueOperation(ctx, userEmail, env.ID, opTypeDestroyCloud, func() error {
@@ -192,6 +342,7 @@ func (s *EnvironmentService) QueueDeleteEnvironment(ctx context.Context, id, use
 	if err != nil {
 		return nil, err
 	}
+	s.clearBlockingOperations(ctx, env)
 	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
 	if err != nil {
 		return nil, err
@@ -200,7 +351,7 @@ func (s *EnvironmentService) QueueDeleteEnvironment(ctx context.Context, id, use
 		return nil, ErrOperationInProgress
 	}
 	if shouldDestroyCloudResources(env) {
-		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.CloudInstanceType, env.InstanceID, env.PublicIP, env.TerraformDir, "", env.CloudProvisionedAt)
+		_, _ = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudDeprovisioning, env.CloudRegion, env.CloudInstanceType, env.CloudKeyName, env.InstanceID, env.PublicIP, env.TerraformDir, "", env.CloudProvisionedAt)
 	}
 
 	return s.queueOperation(ctx, userEmail, env.ID, opTypeDeleteEnvironment, func() error {
@@ -228,7 +379,7 @@ func (s *EnvironmentService) CreateEnvironment(ctx context.Context, userEmail, n
 		name = generateEnvironmentName(userEmail)
 	}
 
-	containerID, err := s.runtime.CreateWorkspace(ctx, name, image, map[string]string{
+	containerID, err := s.resolver.LocalRuntime().CreateWorkspace(ctx, name, image, map[string]string{
 		"docklab.user_email": userEmail,
 		"docklab.name":       name,
 	})
@@ -252,11 +403,19 @@ func (s *EnvironmentService) StartEnvironment(ctx context.Context, id, userEmail
 		return env, nil
 	}
 
-	if err := s.runtime.StartWorkspace(ctx, env.ContainerID); err != nil {
+	if err := s.startWorkspace(ctx, env); err != nil {
 		return nil, err
 	}
 
 	return s.repo.UpdateStatus(ctx, id, userEmail, statusRunning)
+}
+
+func (s *EnvironmentService) startWorkspace(ctx context.Context, env *models.Environment) error {
+	runtime, err := s.runtimeFor(env)
+	if err != nil {
+		return err
+	}
+	return runtime.StartWorkspace(ctx, env.ContainerID)
 }
 
 func (s *EnvironmentService) StopEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -268,11 +427,19 @@ func (s *EnvironmentService) StopEnvironment(ctx context.Context, id, userEmail 
 		return env, nil
 	}
 
-	if err := s.runtime.StopWorkspace(ctx, env.ContainerID); err != nil {
+	if err := s.stopWorkspace(ctx, env); err != nil {
 		return nil, err
 	}
 
 	return s.repo.UpdateStatus(ctx, id, userEmail, statusStopped)
+}
+
+func (s *EnvironmentService) stopWorkspace(ctx context.Context, env *models.Environment) error {
+	runtime, err := s.runtimeFor(env)
+	if err != nil {
+		return err
+	}
+	return runtime.StopWorkspace(ctx, env.ContainerID)
 }
 
 func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmail string) error {
@@ -285,11 +452,19 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 		return err
 	}
 
-	if err := s.runtime.DeleteWorkspace(ctx, env.ContainerID); err != nil {
+	if err := s.deleteWorkspace(ctx, env); err != nil {
 		return err
 	}
 
 	return s.repo.Delete(ctx, id, userEmail)
+}
+
+func (s *EnvironmentService) deleteWorkspace(ctx context.Context, env *models.Environment) error {
+	runtime, err := s.runtimeFor(env)
+	if err != nil {
+		return err
+	}
+	return runtime.DeleteWorkspace(ctx, env.ContainerID)
 }
 
 func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -302,7 +477,16 @@ func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, us
 		return nil, err
 	}
 
-	return s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudNotProvisioned, "", "", "", "", "", "", nil)
+	localContainerID, err := s.bootstrap.RevertToLocal(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.repo.UpdateRuntime(ctx, env.ID, userEmail, runtimeTargetLocal, localContainerID, statusRunning)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudNotProvisioned, "", "", "", "", "", "", "", nil)
 }
 
 func shouldDestroyCloudResources(env *models.Environment) bool {
@@ -329,6 +513,7 @@ func (s *EnvironmentService) destroyCloudResources(ctx context.Context, env *mod
 			cloudProvisionFailed,
 			env.CloudRegion,
 			env.CloudInstanceType,
+			env.CloudKeyName,
 			env.InstanceID,
 			env.PublicIP,
 			env.TerraformDir,
@@ -349,8 +534,11 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 	if env.CloudStatus == cloudProvisioning {
 		return nil, ErrProvisionInProgress
 	}
+	if hasExistingCloudResources(env) {
+		return nil, ErrCloudAlreadyProvisioned
+	}
 
-	_, err = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisioning, req.Region, req.InstanceType, "", "", env.TerraformDir, "", env.CloudProvisionedAt)
+	_, err = s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisioning, req.Region, req.InstanceType, req.KeyName, "", "", env.TerraformDir, "", env.CloudProvisionedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -366,15 +554,32 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 			failedTerraformDir = workspaceErr.TerraformDir
 		}
 
-		failedEnv, updateErr := s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisionFailed, req.Region, req.InstanceType, "", "", failedTerraformDir, err.Error(), env.CloudProvisionedAt)
+		failedEnv, updateErr := s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisionFailed, req.Region, req.InstanceType, req.KeyName, "", "", failedTerraformDir, err.Error(), env.CloudProvisionedAt)
 		if updateErr == nil {
-			return failedEnv, nil
+			return failedEnv, err
 		}
 		return nil, err
 	}
 
-	cloudProvisionedAt := time.Now().UTC()
-	return s.repo.UpdateProvisioning(ctx, env.ID, userEmail, cloudProvisioned, req.Region, req.InstanceType, result.InstanceID, result.PublicIP, result.TerraformDir, "", &cloudProvisionedAt)
+	_, err = s.repo.UpdateProvisioning(
+		ctx,
+		env.ID,
+		userEmail,
+		cloudProvisioning,
+		req.Region,
+		req.InstanceType,
+		req.KeyName,
+		result.InstanceID,
+		result.PublicIP,
+		result.TerraformDir,
+		"bootstrapping remote workspace",
+		env.CloudProvisionedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.completeRemoteBootstrap(ctx, id, userEmail)
 }
 
 func (s *EnvironmentService) GetEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -404,6 +609,20 @@ func (s *EnvironmentService) hasInProgressOperation(ctx context.Context, environ
 	return s.operationRepo.ExistsInProgressForEnvironment(ctx, environmentID, userEmail)
 }
 
+func (s *EnvironmentService) clearStaleOperations(ctx context.Context, environmentID, userEmail string) {
+	_, _ = s.operationRepo.FailStaleInProgressForEnvironment(ctx, environmentID, userEmail, staleEnvironmentOperationThreshold)
+}
+
+func (s *EnvironmentService) clearBlockingOperations(ctx context.Context, env *models.Environment) {
+	if env == nil {
+		return
+	}
+	s.clearStaleOperations(ctx, env.ID, env.UserEmail)
+	if env.InstanceID != "" && env.RuntimeTarget != runtimeTargetRemote {
+		_, _ = s.operationRepo.FailInProgressForEnvironment(ctx, env.ID, env.UserEmail, "cleared incomplete remote bootstrap to allow environment management")
+	}
+}
+
 func generateEnvironmentName(userEmail string) string {
 	base := strings.Split(strings.ToLower(userEmail), "@")[0]
 	base = strings.Map(func(r rune) rune {
@@ -425,7 +644,7 @@ func validateProvisionRequest(req ProvisionRequest) (ProvisionRequest, error) {
 	req.Region = strings.TrimSpace(req.Region)
 	req.InstanceType = strings.TrimSpace(req.InstanceType)
 	req.AMI = strings.TrimSpace(req.AMI)
-	req.KeyName = strings.TrimSpace(req.KeyName)
+	req.KeyName = normalizeEC2KeyName(strings.TrimSpace(req.KeyName))
 
 	if req.Region == "" {
 		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_region", Message: "region is required"}
@@ -448,9 +667,22 @@ func validateProvisionRequest(req ProvisionRequest) (ProvisionRequest, error) {
 		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_ami", Message: "ami must match AMI ID format (for example, ami-0c2b8ca1dad447f8a)"}
 	}
 
-	if req.KeyName != "" && !keyNamePattern.MatchString(req.KeyName) {
+	if req.KeyName == "" {
+		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_key_name", Message: "key_name is required for remote workspace access over SSH"}
+	}
+	if !keyNamePattern.MatchString(req.KeyName) {
 		return ProvisionRequest{}, &ProvisionValidationError{Code: "invalid_key_name", Message: "key_name may only include letters, numbers, dot, underscore, and hyphen"}
 	}
 
 	return req, nil
+}
+
+// normalizeEC2KeyName strips a trailing .pem extension when users confuse the local
+// private key filename with the EC2 key pair name registered in AWS.
+func normalizeEC2KeyName(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) > 4 && strings.EqualFold(name[len(name)-4:], ".pem") {
+		return name[:len(name)-4]
+	}
+	return name
 }

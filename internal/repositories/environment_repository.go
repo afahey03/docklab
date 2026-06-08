@@ -17,7 +17,8 @@ type EnvironmentRepository interface {
 	ListByUserEmail(ctx context.Context, userEmail string) ([]models.Environment, error)
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Environment, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status string) (*models.Environment, error)
-	UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, instanceID, publicIP, terraformDir, cloudError string, cloudProvisionedAt *time.Time) (*models.Environment, error)
+	UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, cloudKeyName, instanceID, publicIP, terraformDir, cloudError string, cloudProvisionedAt *time.Time) (*models.Environment, error)
+	UpdateRuntime(ctx context.Context, id, userEmail, runtimeTarget, containerID, status string) (*models.Environment, error)
 	Delete(ctx context.Context, id, userEmail string) error
 
 	// Activity tracking
@@ -37,7 +38,7 @@ func NewPostgresEnvironmentRepository(db *pgxpool.Pool) *PostgresEnvironmentRepo
 }
 
 // envColumns is the canonical ordered column list used in all SELECT/RETURNING clauses.
-const envColumns = `id, user_email, name, image, status, container_id, cloud_status, cloud_region, cloud_instance_type, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
+const envColumns = `id, user_email, name, image, status, container_id, runtime_target, cloud_status, cloud_region, cloud_instance_type, cloud_key_name, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
 
 func scanEnv(row interface {
 	Scan(dest ...any) error
@@ -49,9 +50,11 @@ func scanEnv(row interface {
 		&env.Image,
 		&env.Status,
 		&env.ContainerID,
+		&env.RuntimeTarget,
 		&env.CloudStatus,
 		&env.CloudRegion,
 		&env.CloudInstanceType,
+		&env.CloudKeyName,
 		&env.InstanceID,
 		&env.PublicIP,
 		&env.TerraformDir,
@@ -155,7 +158,7 @@ func (r *PostgresEnvironmentRepository) UpdateStatus(ctx context.Context, id, us
 	return &env, nil
 }
 
-func (r *PostgresEnvironmentRepository) UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, instanceID, publicIP, terraformDir, cloudError string, cloudProvisionedAt *time.Time) (*models.Environment, error) {
+func (r *PostgresEnvironmentRepository) UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, cloudKeyName, instanceID, publicIP, terraformDir, cloudError string, cloudProvisionedAt *time.Time) (*models.Environment, error) {
 	if r.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
@@ -166,17 +169,44 @@ func (r *PostgresEnvironmentRepository) UpdateProvisioning(ctx context.Context, 
 			cloud_status = $3,
 			cloud_region = $4,
 			cloud_instance_type = $5,
-			instance_id = $6,
-			public_ip = $7,
-			terraform_dir = $8,
-			cloud_error = $9,
-			cloud_provisioned_at = $10,
+			cloud_key_name = $6,
+			instance_id = $7,
+			public_ip = $8,
+			terraform_dir = $9,
+			cloud_error = $10,
+			cloud_provisioned_at = $11,
 			updated_at = NOW()
 		WHERE id = $1 AND user_email = $2
 		RETURNING ` + envColumns
 
 	var env models.Environment
-	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, instanceID, publicIP, terraformDir, cloudError, cloudProvisionedAt), &env)
+	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, cloudKeyName, instanceID, publicIP, terraformDir, cloudError, cloudProvisionedAt), &env)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrEnvironmentNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
+
+func (r *PostgresEnvironmentRepository) UpdateRuntime(ctx context.Context, id, userEmail, runtimeTarget, containerID, status string) (*models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		UPDATE environments
+		SET
+			runtime_target = $3,
+			container_id = $4,
+			status = $5,
+			updated_at = NOW()
+		WHERE id = $1 AND user_email = $2
+		RETURNING ` + envColumns
+
+	var env models.Environment
+	err := scanEnv(r.db.QueryRow(ctx, query, id, userEmail, runtimeTarget, containerID, status), &env)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEnvironmentNotFound
 	}

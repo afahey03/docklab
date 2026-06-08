@@ -97,6 +97,30 @@ func (h *EnvironmentHandler) Provision(c *gin.Context) {
 	c.JSON(http.StatusAccepted, op)
 }
 
+func (h *EnvironmentHandler) RetryRemoteBootstrap(c *gin.Context) {
+	id := c.Param("id")
+	userEmail := c.GetString("user_email")
+	op, err := h.environmentService.QueueRetryRemoteBootstrap(c.Request.Context(), id, userEmail)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, op)
+}
+
+func (h *EnvironmentHandler) GetRemoteHealth(c *gin.Context) {
+	id := c.Param("id")
+	userEmail := c.GetString("user_email")
+	status, err := h.environmentService.GetRemoteHealth(c.Request.Context(), id, userEmail)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
 func (h *EnvironmentHandler) Start(c *gin.Context) {
 	id := c.Param("id")
 	userEmail := c.GetString("user_email")
@@ -184,6 +208,19 @@ func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	}
 	if errors.Is(err, services.ErrOperationNotFound) {
 		c.JSON(http.StatusNotFound, APIErrorResponse{Code: "operation_not_found", Error: "operation not found"})
+		return
+	}
+
+	if errors.Is(err, services.ErrSSHPrivateKeyMissing) {
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "ssh_private_key_missing", Error: err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrSSHConnectionFailed) {
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "ssh_connection_failed", Error: err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrRemoteRuntimeUnavailable) {
+		c.JSON(http.StatusConflict, APIErrorResponse{Code: "remote_runtime_unavailable", Error: err.Error()})
 		return
 	}
 

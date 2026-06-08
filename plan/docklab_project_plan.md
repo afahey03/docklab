@@ -14,9 +14,9 @@ Build a cloud-based remote development environment platform where users can prov
 
 ### Current status (June 2026)
 
-**Sprints 1–6 are complete.** DockLab is a working MVP for local Docker workspaces with browser terminals, Terraform EC2 provisioning, idle local auto-stop, estimated cloud cost visibility, and CI quality gates.
+**Sprints 1–7 are complete.** DockLab supports local and remote Docker workspaces with browser terminals, Terraform EC2 provisioning with SSH bootstrap, idle workspace auto-stop, estimated cloud cost visibility, and CI quality gates.
 
-**The product is not yet fully viable.** EC2 is provisioned and tracked, but workspaces and terminals still run on the local Docker host. The highest-priority remaining work is remote orchestration (Phase 6 / Sprint 7), followed by cloud lifecycle automation and production hardening.
+**Core remote development works** when AWS credentials, Terraform state backend, and an EC2 SSH private key are configured. Remaining viability gaps: cloud lifecycle automation (idle EC2), production deployment, and operational hardening.
 
 For sprint-level tracking, see [sprints.md](./sprints.md).
 
@@ -27,19 +27,19 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 | **Foundation** | Go (Gin) backend, React (Vite) frontend, PostgreSQL, Docker Compose, structured logging |
 | **Authentication** | Register, login, JWT middleware, bcrypt, protected routes, CORS |
 | **Local environments** | Create/list/start/stop/delete Docker workspaces per user |
-| **Browser terminal** | WebSocket + PTY + xterm.js with resize, reconnect, copy/paste |
-| **Terraform provisioning** | EC2 provision/destroy, remote S3 state + DynamoDB locking, async operations, validation errors |
+| **Remote orchestration** | SSH + remote Docker lifecycle, post-provision bootstrap, runtime routing, remote health API |
+| **Browser terminal** | WebSocket + PTY + xterm.js — local docker exec or remote SSH docker exec |
+| **Terraform provisioning** | EC2 with SG + Docker user-data, S3 state + DynamoDB locking, async operations |
 | **Operations** | Postgres-persisted operation queue; polling API; survives restarts |
 | **Reconciliation** | Stale operation and provisioning-state repair (startup + every 5 min) |
-| **Auto-sleep (local)** | Idle local containers stopped after `IDLE_STOP_AFTER_MINUTES` |
+| **Auto-sleep** | Idle workspace containers stopped (local or remote) after `IDLE_STOP_AFTER_MINUTES` |
 | **Cost visibility** | Dashboard usage/cost estimates from `cloud_instance_type` + `cloud_provisioned_at` |
 | **CI** | GitHub Actions: Go fmt/tests, frontend lint/build, Docker build |
 
-### Not implemented yet (required for viability)
+### Not implemented yet
 
 | Priority | Gap | Impact |
 |----------|-----|--------|
-| **P0** | Remote orchestration over SSH | EC2 exists but is not used as a workspace host |
 | **P1** | Cloud auto-stop/terminate for idle EC2 | Provisioned instances can run indefinitely |
 | **P2** | Production deployment (CD) | No hosted environment; dev-only Docker Compose |
 | **P2** | Monitoring, alerting, rate limiting | Not operable under real load or abuse |
@@ -49,7 +49,7 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 
 ### Current focus
 
-**Sprint 7 — Remote container orchestration.** Wire provisioned EC2 into the workspace and terminal flow so DockLab delivers actual remote development, not just local Docker with optional cloud metadata.
+**Sprint 8 — Cloud lifecycle automation.** Extend idle policies to stop or terminate EC2 instances, not just workspace containers.
 
 ---
 
@@ -60,16 +60,15 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 | Layer | Choice |
 |-------|--------|
 | Frontend | React 19, TypeScript, Tailwind CSS 4, React Router, Vite, xterm.js |
-| Backend | Go 1.25, Gin, Gorilla WebSocket, creack/pty, pgx/v5 |
+| Backend | Go 1.25, Gin, Gorilla WebSocket, creack/pty, pgx/v5, golang.org/x/crypto/ssh |
 | Database | PostgreSQL 16 |
-| Infrastructure | Terraform 1.9, AWS EC2, Docker CLI |
+| Infrastructure | Terraform 1.9, AWS EC2, Docker CLI (local + remote over SSH) |
 | DevOps | Docker Compose, GitHub Actions (CI) |
 
 ### Planned / optional
 
 | Layer | Choice | When |
 |-------|--------|------|
-| Remote access | SSH (golang.org/x/crypto/ssh or similar) | Sprint 7 |
 | Caching / queues | Redis | Optional, if async scale requires it |
 | Monitoring | Prometheus + Grafana or CloudWatch | Sprint 9 |
 | Deployment | GitHub Actions CD → hosted runtime | Sprint 9 |
@@ -85,30 +84,18 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 
 ## System architecture
 
-### Today
+### Current architecture
 
 ```text
 React Frontend
        ↓ HTTP / WebSocket
 Go API Server
-       ├── Docker CLI  →  Local workspace containers  →  Browser terminal
-       └── Terraform CLI  →  AWS EC2 (metadata only; not yet wired to terminal)
+       ├── Docker CLI  →  Local workspace containers (runtime_target = local)
+       └── Terraform CLI  →  AWS EC2 (Docker user-data, SSH security group)
+              ↓ SSH + remote Docker CLI
+         Workspace container on EC2 (runtime_target = remote)
 PostgreSQL (users, environments, operations)
-Background workers: reconciliation, lifecycle (local idle stop)
-```
-
-### Target (after Phase 6)
-
-```text
-React Frontend
-       ↓
-Go API Server
-       ↓
-Terraform Runner  →  AWS EC2
-       ↓ SSH
-Remote Docker  →  Workspace container on EC2
-       ↓
-Browser Terminal via WebSockets
+Background workers: reconciliation, lifecycle (idle workspace stop)
 ```
 
 ---
@@ -144,8 +131,8 @@ Dockerfile            # Backend + Terraform CLI
 | 3 | Local Docker environments | ✅ Complete |
 | 4 | Browser terminal | ✅ Complete (local only) |
 | 5 | Terraform integration | ✅ Complete (MVP slice) |
-| 6 | Remote container orchestration | 🔲 **Not started — next** |
-| 7 | Auto-sleep & lifecycle automation | 🟡 Partial (local only) |
+| 6 | Remote container orchestration | ✅ Complete |
+| 7 | Auto-sleep & lifecycle automation | 🟡 Partial (workspace stop; EC2 idle cleanup missing) |
 | 8 | Cost tracking dashboard | 🟡 Partial (estimates only) |
 | 9 | Production hardening | 🟡 Partial (CI only; no CD/monitoring) |
 | 10 | Advanced features | 🔲 Future |
@@ -249,44 +236,23 @@ Provision real AWS infrastructure automatically.
 
 ---
 
-# PHASE 6 — Remote Container Orchestration 🔲 NEXT
+# PHASE 6 — Remote Container Orchestration ✅
 
 ## Goal
 Run Docker workspaces on provisioned EC2 machines and attach the browser terminal remotely.
 
-## Why this is critical
-Without Phase 6, DockLab provisions cloud infrastructure that the product never uses. This is the single largest gap between the current MVP and a viable remote dev platform.
+## Delivered
+- SSH client with `DOKLAB_SSH_PRIVATE_KEY_PATH`, configurable user/port/timeouts
+- Terraform: security group (SSH), Docker install user-data, public IP association
+- `SSHDockerRuntime` and `RuntimeResolver` for local vs remote routing
+- Post-provision bootstrap with SSH/Docker wait, remote container creation, runtime migration
+- Remote terminal via SSH PTY + `docker exec`
+- `GET /api/v1/environments/:id/remote-health`
+- `runtime_target` and `cloud_key_name` on environments; destroy-cloud reverts to local
 
-## Features to build
-- SSH client and credential/key management for provisioned instances
-- EC2 bootstrap: ensure Docker is installed and reachable
-- Remote Docker commands (create/start/stop/delete) over SSH
-- Terminal routing: when `cloud_status = provisioned`, attach PTY to remote container
-- Health monitoring: EC2 reachability, remote Docker daemon status
-- Fallback: local Docker flow when cloud is not provisioned
-
-## Example flow
-
-```text
-Provision EC2 (Phase 5 — done)
-      ↓
-SSH into instance
-      ↓
-Ensure Docker is running
-      ↓
-Launch workspace container on EC2
-      ↓
-Attach browser terminal to remote shell
-```
-
-## Backend tasks
-- SSH client implementation
-- Remote `ContainerRuntime` implementation (parallel to local Docker CLI)
-- Environment service: select local vs remote runtime based on cloud state
-- Startup/user-data scripts for EC2 bootstrap
-
-## Success criteria
-- Remote workspaces are fully operational; terminal sessions run on EC2
+## Success criteria — Met
+- Remote workspaces are operational; terminal sessions run on EC2 when provisioned
+- Local flow unchanged when cloud is not provisioned
 
 ---
 
@@ -389,17 +355,18 @@ Optional enhancements after the core product is viable:
 
 ### Built ✅
 - Authentication
-- Docker workspace creation (local)
-- Browser terminal (local)
-- Terraform EC2 provisioning
-- Auto-sleep (local containers)
+- Docker workspace creation (local + remote)
+- Browser terminal (local + remote over SSH)
+- Terraform EC2 provisioning with Docker bootstrap
+- Auto-sleep (workspace containers)
 - Cost estimates (live)
 - CI quality gates
+- Remote health checks
 
-### Build next (viability)
-1. Remote orchestration (Phase 6)
-2. Cloud lifecycle automation (Phase 7 completion)
-3. Production deployment and hardening (Phase 9 completion)
+### Build next
+1. Cloud lifecycle automation (Phase 7 completion)
+2. Production deployment and hardening (Phase 9 completion)
+3. Durable cost tracking (Phase 8 completion)
 
 ### Avoid initially
 - Kubernetes
@@ -413,12 +380,12 @@ Optional enhancements after the core product is viable:
 
 | # | Challenge | Status |
 |---|-----------|--------|
-| 1 | PTY + WebSocket streaming | ✅ Solved for local; remote path TBD |
+| 1 | PTY + WebSocket streaming | ✅ Local and remote SSH paths |
 | 2 | Infrastructure state management | ✅ Reconciliation + remote Terraform state |
 | 3 | Security isolation | 🟡 Basic; needs quotas and hardening |
-| 4 | Cleanup logic | 🟡 DB/Terraform reconciliation done; EC2 idle cleanup missing |
+| 4 | Cleanup logic | 🟡 Workspace idle stop done; EC2 idle cleanup missing |
 | 5 | Concurrent session handling | 🟡 Works at MVP scale; needs load testing |
-| 6 | Remote SSH + Docker reliability | 🔲 Not started |
+| 6 | Remote SSH + Docker reliability | ✅ Implemented; production hardening remains |
 
 ---
 

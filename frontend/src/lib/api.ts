@@ -23,9 +23,11 @@ export type Environment = {
     image: string;
     status: string;
     container_id: string;
+    runtime_target: string;
     cloud_status: string;
     cloud_region: string;
     cloud_instance_type: string;
+    cloud_key_name: string;
     instance_id: string;
     public_ip: string;
     terraform_dir: string;
@@ -34,6 +36,15 @@ export type Environment = {
     last_activity_at: string;
     created_at: string;
     updated_at: string;
+};
+
+export type RemoteHealthStatus = {
+    runtime_target: string;
+    public_ip: string;
+    ssh_reachable: boolean;
+    docker_available: boolean;
+    workspace_ready?: boolean;
+    error?: string;
 };
 
 export type ProvisionRequest = {
@@ -180,6 +191,20 @@ export async function provisionEnvironment(id: string, payload: ProvisionRequest
 export async function destroyCloudEnvironment(id: string): Promise<Operation> {
     return request<Operation>(`/api/v1/environments/${id}/destroy-cloud`, {
         method: "POST",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function retryRemoteBootstrap(id: string): Promise<Operation> {
+    return request<Operation>(`/api/v1/environments/${id}/retry-bootstrap`, {
+        method: "POST",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function getRemoteHealth(id: string): Promise<RemoteHealthStatus> {
+    return request<RemoteHealthStatus>(`/api/v1/environments/${id}/remote-health`, {
+        method: "GET",
         headers: withAuthHeaders(),
     });
 }

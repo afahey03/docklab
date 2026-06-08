@@ -8,10 +8,10 @@ import (
 
 func TestShellQuote(t *testing.T) {
 	tests := map[string]string{
-		"":           "''",
-		"abc":        "'abc'",
-		"it's":       "'it'\\''s'",
-		"ami-123":    "'ami-123'",
+		"":        "''",
+		"abc":     "'abc'",
+		"it's":    "'it'\\''s'",
+		"ami-123": "'ami-123'",
 	}
 
 	for input, want := range tests {

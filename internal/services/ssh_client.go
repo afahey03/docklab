@@ -14,9 +14,9 @@ import (
 )
 
 var (
-	ErrSSHPrivateKeyMissing   = errors.New("DOKLAB_SSH_PRIVATE_KEY_PATH is not configured")
-	ErrSSHPrivateKeyInvalid   = errors.New("failed to parse SSH private key")
-	ErrSSHConnectionFailed    = errors.New("failed to connect to remote host over SSH")
+	ErrSSHPrivateKeyMissing     = errors.New("DOKLAB_SSH_PRIVATE_KEY_PATH is not configured")
+	ErrSSHPrivateKeyInvalid     = errors.New("failed to parse SSH private key")
+	ErrSSHConnectionFailed      = errors.New("failed to connect to remote host over SSH")
 	ErrRemoteRuntimeUnavailable = errors.New("remote runtime is not available for this environment")
 )
 

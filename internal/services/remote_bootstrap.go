@@ -8,12 +8,12 @@ import (
 )
 
 type RemoteHealthStatus struct {
-	RuntimeTarget    string `json:"runtime_target"`
-	PublicIP         string `json:"public_ip"`
-	SSHReachable     bool   `json:"ssh_reachable"`
-	DockerAvailable  bool   `json:"docker_available"`
-	WorkspaceReady   bool   `json:"workspace_ready"`
-	Error            string `json:"error,omitempty"`
+	RuntimeTarget   string `json:"runtime_target"`
+	PublicIP        string `json:"public_ip"`
+	SSHReachable    bool   `json:"ssh_reachable"`
+	DockerAvailable bool   `json:"docker_available"`
+	WorkspaceReady  bool   `json:"workspace_ready"`
+	Error           string `json:"error,omitempty"`
 }
 
 type RemoteBootstrapService struct {

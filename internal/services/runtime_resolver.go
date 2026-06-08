@@ -10,8 +10,8 @@ import (
 )
 
 type RuntimeResolver struct {
-	local       ContainerRuntime
-	sshFactory  *SSHClientFactory
+	local      ContainerRuntime
+	sshFactory *SSHClientFactory
 }
 
 func NewRuntimeResolver(local ContainerRuntime, cfg config.Config) *RuntimeResolver {

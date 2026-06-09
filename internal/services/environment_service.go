@@ -24,6 +24,7 @@ const (
 	cloudNotProvisioned     = "not_provisioned"
 	cloudProvisioning       = "provisioning"
 	cloudProvisioned        = "provisioned"
+	cloudStopped            = "cloud_stopped"
 	cloudProvisionFailed    = "provision_failed"
 	cloudDeprovisioning     = "deprovisioning"
 	opTypeProvision         = "provision"
@@ -150,6 +151,7 @@ type EnvironmentService struct {
 	resolver        *RuntimeResolver
 	bootstrap       *RemoteBootstrapService
 	terraformRunner TerraformRunner
+	cloudLifecycle  *CloudLifecycleService
 }
 
 func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRepo repositories.OperationRepository, resolver *RuntimeResolver) *EnvironmentService {
@@ -160,6 +162,10 @@ func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRep
 		bootstrap:       NewRemoteBootstrapService(resolver),
 		terraformRunner: NewTerraformCLIRunner(),
 	}
+}
+
+func (s *EnvironmentService) SetCloudLifecycle(cloudLifecycle *CloudLifecycleService) {
+	s.cloudLifecycle = cloudLifecycle
 }
 
 func (s *EnvironmentService) GetRemoteHealth(ctx context.Context, id, userEmail string) (RemoteHealthStatus, error) {
@@ -192,7 +198,7 @@ func hasProvisionedCloudResources(env *models.Environment) bool {
 		return true
 	}
 	switch env.CloudStatus {
-	case cloudProvisioned, cloudDeprovisioning:
+	case cloudProvisioned, cloudStopped, cloudDeprovisioning:
 		return true
 	default:
 		return false
@@ -509,8 +515,18 @@ func (s *EnvironmentService) StartEnvironment(ctx context.Context, id, userEmail
 	if err != nil {
 		return nil, err
 	}
-	if env.Status == statusRunning {
+	if env.Status == statusRunning && env.CloudStatus != cloudStopped {
 		return env, nil
+	}
+
+	if env.CloudStatus == cloudStopped && env.InstanceID != "" {
+		if s.cloudLifecycle == nil {
+			return nil, &ProvisionValidationError{Code: "cloud_lifecycle_unavailable", Message: "cloud lifecycle is not configured"}
+		}
+		env, err = s.cloudLifecycle.StartStoppedCloudInstance(ctx, env)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := s.startWorkspace(ctx, env); err != nil {
@@ -528,7 +544,7 @@ func (s *EnvironmentService) startWorkspace(ctx context.Context, env *models.Env
 	if err != nil {
 		return err
 	}
-	return runtime.StartWorkspace(ctx, env.ContainerID)
+	return runtime.StartWorkspace(ctx, workspaceContainerRef(env))
 }
 
 func (s *EnvironmentService) StopEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -555,7 +571,11 @@ func (s *EnvironmentService) stopWorkspace(ctx context.Context, env *models.Envi
 	if err != nil {
 		return err
 	}
-	return runtime.StopWorkspace(ctx, env.ContainerID)
+	err = runtime.StopWorkspace(ctx, workspaceContainerRef(env))
+	if err != nil && isWorkspaceStopIgnorable(err) {
+		return nil
+	}
+	return err
 }
 
 func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmail string) error {
@@ -583,7 +603,7 @@ func (s *EnvironmentService) deleteWorkspace(ctx context.Context, env *models.En
 	if err != nil {
 		return err
 	}
-	return runtime.DeleteWorkspace(ctx, env.ContainerID)
+	return runtime.DeleteWorkspace(ctx, workspaceContainerRef(env))
 }
 
 func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -598,7 +618,7 @@ func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, us
 
 	if env.RuntimeTarget == runtimeTargetRemote && env.ContainerID != "" && !isPlaceholderContainerID(env.ContainerID) {
 		if remoteRuntime, remoteErr := s.resolver.ForEnvironment(env); remoteErr == nil {
-			_ = remoteRuntime.DeleteWorkspace(ctx, env.ContainerID)
+			_ = remoteRuntime.DeleteWorkspace(ctx, workspaceContainerRef(env))
 		}
 	}
 
@@ -628,7 +648,7 @@ func shouldDestroyCloudResources(env *models.Environment) bool {
 		return false
 	}
 
-	return env.CloudStatus == cloudProvisioned || env.InstanceID != "" || env.TerraformDir != ""
+	return env.CloudStatus == cloudProvisioned || env.CloudStatus == cloudStopped || env.InstanceID != "" || env.TerraformDir != ""
 }
 
 func (s *EnvironmentService) destroyCloudResources(ctx context.Context, env *models.Environment, userEmail string) error {

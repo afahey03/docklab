@@ -14,9 +14,9 @@ Build a cloud-based remote development environment platform where users can prov
 
 ### Current status (June 2026)
 
-**Sprints 1–7 are complete.** DockLab supports local and remote Docker workspaces with browser terminals, Terraform EC2 provisioning with SSH bootstrap, idle workspace auto-stop, estimated cloud cost visibility, and CI quality gates.
+**Sprints 1–8 are complete.** DockLab supports local and remote Docker workspaces with browser terminals, Terraform EC2 provisioning with SSH bootstrap, idle workspace and EC2 lifecycle automation, estimated cloud cost visibility, and CI quality gates.
 
-**Core remote development works** when AWS credentials, Terraform state backend, and an EC2 SSH private key are configured. Remaining viability gaps: cloud lifecycle automation (idle EC2), production deployment, and operational hardening.
+**Core remote development works** when AWS credentials, Terraform state backend, and an EC2 SSH private key are configured. Remaining viability gaps: production deployment and operational hardening.
 
 For sprint-level tracking, see [sprints.md](./sprints.md).
 
@@ -34,7 +34,7 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 | **Terraform provisioning** | EC2 with SG + Docker user-data, S3 state + DynamoDB locking, async operations |
 | **Operations** | Postgres-persisted operation queue; polling API; survives restarts |
 | **Reconciliation** | Stale operation and provisioning-state repair (startup + every 5 min) |
-| **Auto-sleep** | Idle workspace containers stopped (local or remote) after `IDLE_STOP_AFTER_MINUTES` |
+| **Auto-sleep** | Idle workspace containers stopped after `IDLE_STOP_AFTER_MINUTES`; idle EC2 stopped/terminated per cloud lifecycle policy |
 | **Cost visibility** | Dashboard usage/cost estimates from `cloud_instance_type` + `cloud_provisioned_at` |
 | **CI** | GitHub Actions: Go fmt/tests, frontend lint/build, Docker build |
 
@@ -42,16 +42,16 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 
 | Priority | Gap | Impact |
 |----------|-----|--------|
-| **P1** | Cloud auto-stop/terminate for idle EC2 | Provisioned instances can run indefinitely |
-| **P2** | Production deployment (CD) | No hosted environment; dev-only Docker Compose |
+| **P1** | Production deployment (CD) | No hosted environment; dev-only Docker Compose |
 | **P2** | Monitoring, alerting, rate limiting | Not operable under real load or abuse |
 | **P3** | Persisted usage history and accurate pricing | Cost view is live estimate only |
 | **P3** | JWT refresh tokens | Sessions expire without renewal |
+| **P3** | Per-user lifecycle policy | Global env thresholds only |
 | **Future** | IDE in browser, K8s, templates, collaboration | Stretch goals |
 
 ### Current focus
 
-**Sprint 8 — Cloud lifecycle automation.** Extend idle policies to stop or terminate EC2 instances, not just workspace containers.
+**Sprint 9 — Production hardening and deployment.** CD, monitoring, rate limiting, and secrets management.
 
 ---
 
@@ -97,7 +97,7 @@ Go API Server
               ↓ SSH + remote Docker CLI
          Workspace container on EC2 (runtime_target = remote)
 PostgreSQL (users, environments, operations)
-Background workers: reconciliation, lifecycle (idle workspace stop)
+Background workers: reconciliation, lifecycle (idle workspace stop + idle EC2 stop/terminate)
 ```
 
 ---
@@ -134,7 +134,7 @@ Dockerfile            # Backend + Terraform CLI
 | 4 | Browser terminal | ✅ Complete (local only) |
 | 5 | Terraform integration | ✅ Complete (MVP slice) |
 | 6 | Remote container orchestration | ✅ Complete |
-| 7 | Auto-sleep & lifecycle automation | 🟡 Partial (workspace stop; EC2 idle cleanup missing) |
+| 7 | Auto-sleep & lifecycle automation | ✅ Complete |
 | 8 | Cost tracking dashboard | 🟡 Partial (estimates only) |
 | 9 | Production hardening | 🟡 Partial (CI only; no CD/monitoring) |
 | 10 | Advanced features | 🔲 Future |
@@ -258,25 +258,26 @@ Run Docker workspaces on provisioned EC2 machines and attach the browser termina
 
 ---
 
-# PHASE 7 — Auto-Sleep & Lifecycle Automation 🟡 PARTIAL
+# PHASE 7 — Auto-Sleep & Lifecycle Automation ✅
 
 ## Goal
 Prevent unnecessary cloud and local resource costs.
 
-## Delivered (local only)
+## Delivered
 - `last_activity_at` tracking via terminal sessions
-- Lifecycle worker stops idle **local** running containers after configurable threshold
-- Reconciliation repairs stale provisioning states and orphaned operations
+- Lifecycle worker stops idle workspace containers (local or remote) after configurable threshold
+- Cloud lifecycle worker stops idle provisioned EC2, then terminates stopped EC2 after a longer threshold
+- `cloud_stopped` status with **Start** to wake EC2 and restart remote workspace
+- `GET /api/v1/lifecycle-policy`; dashboard idle policy summary and billing warnings
+- Reconciliation repairs stale provisioning states and clears DB rows when EC2 instances no longer exist in AWS
 
-## Remaining
-- Idle detection for provisioned EC2 (stop or terminate)
-- Configurable tiered policies (e.g. idle 15 min → stop container; idle 1 hr → stop EC2; idle 24 hr → terminate)
-- Scheduled cleanup for environments marked deleted but with lingering cloud resources
-- CPU/network activity signals (optional enhancement beyond terminal activity)
+## Remaining (optional)
+- Per-user or per-environment lifecycle policy overrides
+- CPU/network activity signals beyond terminal activity
 
-## Success criteria (full)
+## Success criteria — Met
 - Idle environments and cloud resources are cleaned automatically
-- No orphaned EC2 instances left running indefinitely
+- No orphaned EC2 instances left running indefinitely without dashboard visibility
 
 ---
 
@@ -360,15 +361,14 @@ Optional enhancements after the core product is viable:
 - Docker workspace creation (local + remote)
 - Browser terminal (local + remote over SSH)
 - Terraform EC2 provisioning with Docker bootstrap
-- Auto-sleep (workspace containers)
+- Auto-sleep (workspace containers + idle EC2 stop/terminate)
 - Cost estimates (live)
 - CI quality gates
 - Remote health checks
 
 ### Build next
-1. Cloud lifecycle automation (Phase 7 completion)
-2. Production deployment and hardening (Phase 9 completion)
-3. Durable cost tracking (Phase 8 completion)
+1. Production deployment and hardening (Phase 9 completion)
+2. Durable cost tracking (Phase 8 completion)
 
 ### Avoid initially
 - Kubernetes

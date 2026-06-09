@@ -10,6 +10,8 @@ export type EnvironmentCapabilities = {
     canTerminateEC2: boolean;
     canCheckRemoteHealth: boolean;
     showCloudWarning: boolean;
+    showCloudIdleBillingWarning: boolean;
+    showCloudStoppedIndicator: boolean;
     showRemoteBootstrapHint: boolean;
     provisionLabel: string;
     repairRemoteLabel: string;
@@ -63,6 +65,7 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
     const isTransitioning = transitionalCloudStatuses.has(cloudStatus);
     const isRunning = env.status === "running";
     const isProvisioned = cloudStatus === "provisioned";
+    const isCloudStopped = cloudStatus === "cloud_stopped";
     const isProvisionFailed = cloudStatus === "provision_failed";
     const workspacePending = isPlaceholderContainer(env);
     const canRepairRemoteWorkspace = !isPending && needsRemoteRepair(env) && !isTransitioning;
@@ -109,7 +112,9 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
         canRepairRemoteWorkspace,
         canTerminateEC2,
         canCheckRemoteHealth: !isPending && hasInstance,
-        showCloudWarning: isProvisionFailed || Boolean(env.cloud_error),
+        showCloudWarning: isProvisionFailed || (Boolean(env.cloud_error) && !isCloudStopped && cloudStatus !== "provisioning"),
+        showCloudIdleBillingWarning: isProvisioned && hasInstance && env.status === "stopped",
+        showCloudStoppedIndicator: isCloudStopped && hasInstance,
         showRemoteBootstrapHint: needsRemoteBootstrap(env),
         provisionLabel,
         repairRemoteLabel,

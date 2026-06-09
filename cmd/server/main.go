@@ -43,9 +43,24 @@ func main() {
 	localRuntime := services.NewDockerCLIRuntime()
 	runtimeResolver := services.NewRuntimeResolver(localRuntime, cfg)
 	environmentService := services.NewEnvironmentService(environmentRepo, operationRepo, runtimeResolver)
+	ec2Client := services.NewAWSEC2InstanceClient()
+	cloudLifecycle := services.NewCloudLifecycleService(
+		environmentRepo,
+		operationRepo,
+		runtimeResolver,
+		services.NewTerraformCLIRunner(),
+		ec2Client,
+		cfg.IdleStopMinutes,
+		cfg.IdleCloudStopMinutes,
+		cfg.IdleCloudTerminateMinutes,
+		cfg.CloudIdlePolicyEnabled,
+		logr,
+	)
+	environmentService.SetCloudLifecycle(cloudLifecycle)
 	terminalService := services.NewTerminalService(environmentRepo, runtimeResolver)
 	authHandler := handlers.NewAuthHandler(authService)
 	environmentHandler := handlers.NewEnvironmentHandler(environmentService)
+	lifecycleHandler := handlers.NewLifecycleHandler(cloudLifecycle)
 	terminalHandler := handlers.NewTerminalHandler(authService, terminalService)
 	healthHandler := handlers.NewHealthHandler(dbPool)
 
@@ -54,12 +69,12 @@ func main() {
 	defer bgCancel()
 
 	// Sprint 4: cloud drift / orphan reconciliation.
-	reconciler := services.NewReconciliationService(environmentRepo, operationRepo, logr)
+	reconciler := services.NewReconciliationService(environmentRepo, operationRepo, ec2Client, logr)
 	reconciler.Start(bgCtx)
 
-	// Sprint 5: auto-sleep idle environments.
-	lifecycle := services.NewLifecycleService(environmentRepo, runtimeResolver, cfg.IdleStopMinutes, logr)
-	lifecycle.Start(bgCtx)
+	// Sprint 5/8: auto-sleep idle workspace containers and idle cloud resources.
+	workspaceLifecycle := services.NewLifecycleService(environmentRepo, runtimeResolver, cfg.IdleStopMinutes, logr)
+	cloudLifecycle.Start(bgCtx, workspaceLifecycle)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -86,6 +101,7 @@ func main() {
 	protected := api.Group("")
 	protected.Use(middleware.JWTAuth(authService))
 	protected.GET("/auth/me", authHandler.Me)
+	protected.GET("/lifecycle-policy", lifecycleHandler.GetPolicy)
 	protected.POST("/environments", environmentHandler.Create)
 	protected.GET("/environments", environmentHandler.List)
 	protected.GET("/environments/:id", environmentHandler.Get)

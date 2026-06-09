@@ -157,21 +157,23 @@ Make provisioned EC2 instances usable as actual remote development workspaces.
 
 ---
 
-## Sprint 8 🔲 Cloud Lifecycle Automation
+## Sprint 8 ✅ Cloud Lifecycle Automation
 
 ### Goal
 Stop paying for idle cloud resources.
 
-### Scope
-- Extend idle detection to provisioned EC2 instances (not just local containers)
-- Configurable policies: idle → stop EC2, idle longer → terminate EC2
-- Separate policies for local container vs cloud resource lifecycle
-- Dashboard indicators when cloud resources are running but workspace is idle
-- Reconciliation improvements for orphaned EC2 instances (Terraform state vs DB drift)
+### Delivered
+- `CloudLifecycleService` background worker: idle workspace stop (existing) + idle EC2 stop + idle EC2 terminate
+- AWS EC2 API integration for stop/start (`AWSEC2InstanceClient`)
+- New `cloud_stopped` status; **Start** wakes stopped EC2 and restarts remote workspace
+- Env-configurable thresholds: `IDLE_STOP_AFTER_MINUTES`, `IDLE_CLOUD_STOP_AFTER_MINUTES`, `IDLE_CLOUD_TERMINATE_AFTER_MINUTES`, `DOKLAB_CLOUD_IDLE_POLICY_ENABLED`
+- `GET /api/v1/lifecycle-policy` for dashboard policy visibility
+- Dashboard idle policy summary, billing warning when workspace stopped but EC2 running, `cloud_stopped` indicator
+- Reconciliation clears environments whose EC2 instances no longer exist in AWS
 
-### Definition of Done
+### Definition of Done — Met
 - Idle provisioned environments no longer leave EC2 running indefinitely.
-- Users can configure or see the idle cloud policy applied to their environments.
+- Users can see the idle cloud policy applied to their environments (env-configured thresholds).
 
 ---
 
@@ -223,6 +225,6 @@ Turn cost estimates into durable, auditable usage data.
 | 5 | ✅ Done | Local auto-sleep |
 | 6 | ✅ Done | Cost visibility + CI |
 | 7 | ✅ Done | Remote orchestration |
-| 8 | 🔲 Next | Cloud lifecycle automation |
-| 9 | 🔲 Planned | Production hardening + deployment |
+| 8 | ✅ Done | Cloud lifecycle automation |
+| 9 | 🔲 Next | Production hardening + deployment |
 | 10 | 🔲 Stretch | Durable cost tracking |

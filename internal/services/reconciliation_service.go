@@ -29,17 +29,20 @@ const (
 type ReconciliationService struct {
 	environmentRepo repositories.EnvironmentRepository
 	operationRepo   repositories.OperationRepository
+	ec2             EC2InstanceClient
 	log             *slog.Logger
 }
 
 func NewReconciliationService(
 	environmentRepo repositories.EnvironmentRepository,
 	operationRepo repositories.OperationRepository,
+	ec2 EC2InstanceClient,
 	log *slog.Logger,
 ) *ReconciliationService {
 	return &ReconciliationService{
 		environmentRepo: environmentRepo,
 		operationRepo:   operationRepo,
+		ec2:             ec2,
 		log:             log,
 	}
 }
@@ -80,5 +83,44 @@ func (s *ReconciliationService) runOnce(ctx context.Context) {
 		s.log.Error("reconciliation: failed to reconcile stale provisioning", "error", err)
 	} else if staleEnvs > 0 {
 		s.log.Warn("reconciliation: marked stale provisioning environments as failed", "count", staleEnvs)
+	}
+
+	s.reconcileMissingCloudInstances(ctx)
+}
+
+func (s *ReconciliationService) reconcileMissingCloudInstances(ctx context.Context) {
+	if s.ec2 == nil {
+		return
+	}
+
+	envs, err := s.environmentRepo.ListWithCloudInstanceID(ctx)
+	if err != nil {
+		s.log.Error("reconciliation: failed to list cloud environments", "error", err)
+		return
+	}
+
+	missing := make([]string, 0)
+	for _, env := range envs {
+		state, describeErr := s.ec2.DescribeInstance(ctx, env.CloudRegion, env.InstanceID)
+		if describeErr != nil {
+			missing = append(missing, env.InstanceID)
+			continue
+		}
+		if state == nil || isEC2InstanceTerminated(state.State) {
+			missing = append(missing, env.InstanceID)
+		}
+	}
+
+	if len(missing) == 0 {
+		return
+	}
+
+	updated, err := s.environmentRepo.ReconcileMissingCloudInstances(ctx, missing)
+	if err != nil {
+		s.log.Error("reconciliation: failed to clear missing cloud instances", "error", err)
+		return
+	}
+	if updated > 0 {
+		s.log.Warn("reconciliation: cleared environments with missing ec2 instances", "count", updated)
 	}
 }

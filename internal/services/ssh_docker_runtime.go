@@ -37,7 +37,29 @@ func (r *SSHDockerRuntime) runDocker(ctx context.Context, args ...string) (strin
 		quoted[i] = shellQuote(arg)
 	}
 	command := "docker " + strings.Join(quoted, " ")
-	return r.factory.Run(ctx, r.host, remoteShellCommand(command))
+	output, err := r.factory.Run(ctx, r.host, remoteShellCommand(command))
+	return strings.TrimSpace(output), err
+}
+
+func workspaceContainerRef(env *models.Environment) string {
+	if env != nil && env.RuntimeTarget == runtimeTargetRemote {
+		return RemoteContainerName(env.ID)
+	}
+	if env == nil {
+		return ""
+	}
+	return env.ContainerID
+}
+
+func isWorkspaceStopIgnorable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such container") ||
+		strings.Contains(message, "page not found") ||
+		strings.Contains(message, "is not running") ||
+		strings.Contains(message, "already stopped")
 }
 
 func (r *SSHDockerRuntime) CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error) {

@@ -27,6 +27,12 @@ type EnvironmentRepository interface {
 
 	// Reconciliation
 	ReconcileStaleProvisioning(ctx context.Context, olderThan time.Duration) (int64, error)
+	ReconcileMissingCloudInstances(ctx context.Context, instanceIDs []string) (int64, error)
+
+	// Cloud lifecycle
+	ListIdleProvisionedCloudSince(ctx context.Context, since time.Time) ([]models.Environment, error)
+	ListIdleStoppedCloudSince(ctx context.Context, since time.Time) ([]models.Environment, error)
+	ListWithCloudInstanceID(ctx context.Context) ([]models.Environment, error)
 }
 
 type PostgresEnvironmentRepository struct {
@@ -310,4 +316,105 @@ func (r *PostgresEnvironmentRepository) ReconcileStaleProvisioning(ctx context.C
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+func (r *PostgresEnvironmentRepository) ListIdleProvisionedCloudSince(ctx context.Context, since time.Time) ([]models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + envColumns + `
+		FROM environments
+		WHERE cloud_status = 'provisioned'
+		  AND instance_id <> ''
+		  AND last_activity_at < $1`
+
+	return r.queryEnvironments(ctx, query, since)
+}
+
+func (r *PostgresEnvironmentRepository) ListIdleStoppedCloudSince(ctx context.Context, since time.Time) ([]models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + envColumns + `
+		FROM environments
+		WHERE cloud_status = 'cloud_stopped'
+		  AND instance_id <> ''
+		  AND last_activity_at < $1`
+
+	return r.queryEnvironments(ctx, query, since)
+}
+
+func (r *PostgresEnvironmentRepository) ListWithCloudInstanceID(ctx context.Context) ([]models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + envColumns + `
+		FROM environments
+		WHERE instance_id <> ''
+		  AND cloud_status IN ('provisioned', 'cloud_stopped')`
+
+	return r.queryEnvironments(ctx, query)
+}
+
+func (r *PostgresEnvironmentRepository) ReconcileMissingCloudInstances(ctx context.Context, instanceIDs []string) (int64, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+	if len(instanceIDs) == 0 {
+		return 0, nil
+	}
+
+	const query = `
+		UPDATE environments
+		SET
+			cloud_status = 'not_provisioned',
+			instance_id = '',
+			public_ip = '',
+			terraform_dir = '',
+			cloud_error = $2,
+			cloud_provisioned_at = NULL,
+			runtime_target = 'local',
+			status = 'stopped',
+			container_id = 'pending-reconciled-' || id::text,
+			updated_at = NOW()
+		WHERE instance_id = ANY($1)
+		  AND cloud_status IN ('provisioned', 'cloud_stopped')`
+
+	result, err := r.db.Exec(ctx, query, instanceIDs, orphanReconcileMessage())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+func orphanReconcileMessage() string {
+	return "EC2 instance no longer exists in AWS; cloud resources cleared during reconciliation"
+}
+
+func (r *PostgresEnvironmentRepository) queryEnvironments(ctx context.Context, query string, args ...any) ([]models.Environment, error) {
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	environments := make([]models.Environment, 0)
+	for rows.Next() {
+		var env models.Environment
+		if err := scanEnv(rows, &env); err != nil {
+			return nil, err
+		}
+		environments = append(environments, env)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return environments, nil
 }

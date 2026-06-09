@@ -39,6 +39,13 @@ export type Environment = {
     updated_at: string;
 };
 
+export type LifecyclePolicy = {
+    enabled: boolean;
+    workspace_idle_stop_minutes: number;
+    cloud_idle_stop_minutes: number;
+    cloud_idle_terminate_minutes: number;
+};
+
 export type RemoteHealthStatus = {
     runtime_target: string;
     public_ip: string;
@@ -219,6 +226,13 @@ export async function retryRemoteBootstrap(id: string): Promise<Operation> {
 
 export async function getRemoteHealth(id: string): Promise<RemoteHealthStatus> {
     return request<RemoteHealthStatus>(`/api/v1/environments/${id}/remote-health`, {
+        method: "GET",
+        headers: withAuthHeaders(),
+    });
+}
+
+export async function getLifecyclePolicy(): Promise<LifecyclePolicy> {
+    return request<LifecyclePolicy>("/api/v1/lifecycle-policy", {
         method: "GET",
         headers: withAuthHeaders(),
     });

@@ -8,7 +8,7 @@ Cloud-based remote development environment platform. Users authenticate, manage 
 
 ## Current status
 
-**MVP complete through Sprint 7 (June 2026).** The platform supports auth, local and remote Docker workspaces, browser terminals (local or over SSH), Terraform EC2 provisioning with post-provision bootstrap, idle auto-stop, estimated cloud usage/cost visibility, and remote health checks.
+**MVP complete through Sprint 8 (June 2026).** The platform supports auth, local and remote Docker workspaces, browser terminals (local or over SSH), Terraform EC2 provisioning with post-provision bootstrap, idle workspace and EC2 lifecycle automation, estimated cloud usage/cost visibility, and remote health checks.
 
 **Core remote-dev flow works when AWS and SSH are configured.** At create time, choose a **local Docker workspace** or a **cloud workspace (EC2)**. Cloud environments provision EC2 and bootstrap the remote container in one async flow — no throwaway local container first. Local environments can optionally be upgraded to EC2 later. See [Known limitations](#known-limitations) for remaining gaps.
 
@@ -63,6 +63,7 @@ plan/                      # Project plan and sprint tracking
 - Terraform provisioning: `POST /api/v1/environments/:id/provision` — upgrade a **local** workspace to EC2 (blocked for cloud-created environments and when EC2 already exists)
 - Detach cloud resources: `POST /api/v1/environments/:id/destroy-cloud` (local-upgraded envs only; reverts to local Docker; blocked for cloud-created workspaces)
 - Async operation status: `GET /api/v1/operations/:id`
+- Lifecycle policy: `GET /api/v1/lifecycle-policy` (workspace/EC2 idle thresholds)
 - Postgres-persisted operation tracking (survives backend restarts)
 - Typed provisioning validation errors (`code` + `error`)
 - Local Docker workspace lifecycle via `docker` CLI
@@ -70,8 +71,8 @@ plan/                      # Project plan and sprint tracking
 - Post-provision bootstrap: wait for SSH/Docker (2s poll interval), pre-pull workspace image in EC2 user-data, ensure remote container by name (`docklab-{environment_id}`), switch runtime target; dashboard shows live bootstrap phase in `cloud_error`
 - PTY-backed browser terminal (`GET /api/v1/environments/:id/terminal/ws`) — local or remote via SSH
 - Structured JSON logging (`log/slog`)
-- Cloud drift/orphan reconciliation (runs on startup and every 5 minutes)
-- Auto-sleep lifecycle worker: stops idle running environments (local or remote container) after `IDLE_STOP_AFTER_MINUTES` (default 60); terminal sessions refresh `last_activity_at` every 60 s
+- Cloud drift/orphan reconciliation (runs on startup and every 5 minutes; clears DB rows when EC2 instances no longer exist in AWS)
+- Auto-sleep lifecycle: stops idle workspace containers after `IDLE_STOP_AFTER_MINUTES` (default 60); stops idle EC2 after `IDLE_CLOUD_STOP_AFTER_MINUTES` (default 2× workspace threshold); terminates stopped EC2 after `IDLE_CLOUD_TERMINATE_AFTER_MINUTES` (default 1440); terminal sessions refresh `last_activity_at` every 60 s
 - Persisted cloud usage metadata (`creation_mode`, `cloud_instance_type`, `cloud_provisioned_at`, `cloud_key_name`, `runtime_target`) for dashboard visibility
 
 ## Frontend features
@@ -84,6 +85,7 @@ plan/                      # Project plan and sprint tracking
 - Environment create/start/stop/delete/upgrade-to-cloud/terminate controls with context-aware button availability
 - Separate workspace and cloud status badges on environment cards
 - Runtime target and remote health indicators (including workspace container readiness); 5s dashboard refresh while cloud provisioning is in progress
+- Idle cloud policy summary and billing warnings when EC2 is running but the workspace is stopped; `cloud_stopped` indicator when EC2 was auto-stopped
 - **Complete remote setup** / **Retry remote setup** when bootstrap is incomplete or failed
 - Async operation polling with progress feedback
 - In-app confirmation modals for destructive actions
@@ -95,7 +97,7 @@ These are intentional MVP boundaries documented in the sprint plan:
 
 | Area | Current behavior | Remaining work |
 |------|------------------|----------------|
-| Cloud auto-sleep | Idle policy stops workspace containers; **EC2 keeps running** | Stop or terminate idle EC2 instances (Sprint 8) |
+| Per-user idle policy | Global env-based thresholds only | Per-user or per-environment lifecycle settings |
 | SSH key setup | Backend reads private key from `DOKLAB_SSH_PRIVATE_KEY_PATH`; must match EC2 key pair | Secrets management for production |
 | Remote bootstrap | Fixed `ec2-user` default; Amazon Linux–oriented user-data | Ubuntu AMI auto-detection, configurable bootstrap scripts |
 | Cost tracking | Client-side estimates from hardcoded t3 on-demand rates | Persisted usage history; optional AWS Pricing API |
@@ -195,6 +197,9 @@ Used variables:
 | `DOKLAB_TERRAFORM_STATE_TABLE` | DynamoDB table for state locking (`LockID` string partition key) |
 | `DOKLAB_TERRAFORM_STATE_KEY_PREFIX` | Optional, default `docklab/environments` |
 | `IDLE_STOP_AFTER_MINUTES` | Optional, default `60` — workspace container idle timeout |
+| `IDLE_CLOUD_STOP_AFTER_MINUTES` | Optional, default `2 × IDLE_STOP_AFTER_MINUTES` — stop provisioned EC2 after inactivity |
+| `IDLE_CLOUD_TERMINATE_AFTER_MINUTES` | Optional, default `1440` — terminate stopped EC2 after inactivity (`0` disables auto-terminate) |
+| `DOKLAB_CLOUD_IDLE_POLICY_ENABLED` | Optional, default `true` — enable automatic EC2 stop/terminate |
 | `DOKLAB_SSH_PRIVATE_KEY_PATH` | **Required for remote workspaces** — path to EC2 SSH private key |
 | `DOKLAB_SSH_USER` | Optional, default `ec2-user` |
 | `DOKLAB_SSH_PORT` | Optional, default `22` |
@@ -218,7 +223,9 @@ Used variables:
 13. Long-running cloud actions run asynchronously; the dashboard polls operation status until completion.
 14. Operation status is persisted in PostgreSQL, so polling survives backend restarts.
 15. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped (local or remote container).
-16. The **Usage & Cost** view estimates EC2 runtime spend for provisioned environments.
+16. Idle provisioned EC2 instances are automatically stopped, then terminated per `IDLE_CLOUD_STOP_AFTER_MINUTES` and `IDLE_CLOUD_TERMINATE_AFTER_MINUTES`; use **Start** to wake a `cloud_stopped` instance.
+17. The dashboard shows the active idle policy and warnings when EC2 is still billing while the workspace is stopped.
+18. The **Usage & Cost** view estimates EC2 runtime spend for running (`provisioned`) instances only.
 
 Terminal tips:
 
@@ -268,6 +275,8 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 11. Verify **Usage & Cost** shows provisioned environments and non-zero rate estimates.
 12. Use **Terminate EC2** on an upgraded local env to revert to local Docker; cloud workspaces use **Delete** only.
 13. Use **Delete** and confirm both the environment row and EC2 resources are removed.
+14. Leave a provisioned environment idle past the workspace threshold, confirm the workspace stops, then EC2 moves to `cloud_stopped`.
+15. Call `GET /api/v1/lifecycle-policy` and confirm the dashboard idle policy summary matches your env configuration.
 
 ## Roadmap
 
@@ -275,6 +284,5 @@ See [plan/sprints.md](plan/sprints.md) for sprint-level tracking and [plan/dockl
 
 **Next priorities:**
 
-1. **Sprint 8 — Cloud lifecycle automation:** Auto-stop or terminate idle EC2 instances.
-2. **Sprint 9 — Production hardening & deployment:** Rate limiting, monitoring, secrets management, and CD beyond CI.
-3. **Sprint 10 — Cost tracking hardening:** Persisted usage history and accurate pricing.
+1. **Sprint 9 — Production hardening & deployment:** Rate limiting, monitoring, secrets management, and CD beyond CI.
+2. **Sprint 10 — Cost tracking hardening:** Persisted usage history and accurate pricing.

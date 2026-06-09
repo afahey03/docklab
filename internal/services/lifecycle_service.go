@@ -15,8 +15,8 @@ const (
 
 // LifecycleService runs a background worker that automatically stops running environments
 // that have been idle (no terminal activity) for longer than the configured threshold.
-// Cloud resources (EC2 instances) are left untouched; only the workspace container is
-// stopped. Users can restart the environment from the dashboard at any time.
+// Only the workspace container is stopped here; EC2 stop/terminate is handled by
+// CloudLifecycleService. Users can restart the environment from the dashboard at any time.
 type LifecycleService struct {
 	environmentRepo repositories.EnvironmentRepository
 	resolver        *RuntimeResolver
@@ -102,10 +102,10 @@ func (s *LifecycleService) stopIdleEnvironments(ctx context.Context) {
 		}
 
 		stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = runtime.StopWorkspace(stopCtx, env.ContainerID)
+		err = runtime.StopWorkspace(stopCtx, workspaceContainerRef(&env))
 		cancel()
 
-		if err != nil {
+		if err != nil && !isWorkspaceStopIgnorable(err) {
 			s.log.Error("lifecycle: failed to stop idle environment",
 				"environment_id", env.ID,
 				"error", err,

@@ -10,8 +10,10 @@ import {
     retryRemoteBootstrap,
     getRemoteHealth,
     getEnvironments,
+    getLifecyclePolicy,
     getMe,
     getOperation,
+    type LifecyclePolicy,
     provisionEnvironment,
     startEnvironment,
     stopEnvironment,
@@ -196,7 +198,7 @@ function CloudProvisionFieldsForm({
 }
 
 function getEnvironmentUsageSummary(env: Environment): EnvironmentUsageSummary {
-    const isCloudActive = Boolean(env.instance_id || env.terraform_dir || env.cloud_status === "provisioned");
+    const isCloudActive = env.cloud_status === "provisioned" && Boolean(env.instance_id);
     const hourlyRate = getCloudHourlyRate(env.cloud_instance_type);
 
     if (!isCloudActive || !env.cloud_provisioned_at) {
@@ -256,6 +258,7 @@ export function DashboardPage() {
     const [activeTerminalEnvironmentId, setActiveTerminalEnvironmentId] = useState("");
     const [terminalConnected, setTerminalConnected] = useState(false);
     const [remoteHealthByEnvironment, setRemoteHealthByEnvironment] = useState<Record<string, RemoteHealthStatus | undefined>>({});
+    const [lifecyclePolicy, setLifecyclePolicy] = useState<LifecyclePolicy | null>(null);
     const terminalContainerRef = useRef<HTMLDivElement | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const xtermRef = useRef<Terminal | null>(null);
@@ -365,9 +368,14 @@ export function DashboardPage() {
     useEffect(() => {
         async function bootstrapDashboard() {
             try {
-                const [user, envs] = await Promise.all([getMe(), getEnvironments()]);
+                const [user, envs, policy] = await Promise.all([
+                    getMe(),
+                    getEnvironments(),
+                    getLifecyclePolicy(),
+                ]);
                 setEmail(user.email);
                 setEnvironments(envs);
+                setLifecyclePolicy(policy);
             } catch {
                 clearToken();
                 navigate("/login", { replace: true });
@@ -835,6 +843,8 @@ export function DashboardPage() {
         switch (cloudStatus) {
             case "provisioned":
                 return "border-emerald-700 text-emerald-300";
+            case "cloud_stopped":
+                return "border-sky-700 text-sky-300";
             case "provisioning":
             case "deprovisioning":
                 return "border-amber-700 text-amber-300";
@@ -989,7 +999,25 @@ export function DashboardPage() {
                                 </article>
 
                                 <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                                    <h3 className="font-medium">Your environments</h3>
+                                    <div className="flex flex-wrap items-start justify-between gap-3">
+                                        <h3 className="font-medium">Your environments</h3>
+                                        {lifecyclePolicy ? (
+                                            <p className="max-w-xl text-xs text-slate-500">
+                                                Idle policy
+                                                {lifecyclePolicy.enabled ? "" : " (disabled)"}: workspace stops after{" "}
+                                                {lifecyclePolicy.workspace_idle_stop_minutes}m
+                                                {lifecyclePolicy.enabled ? (
+                                                    <>
+                                                        {" "}
+                                                        | EC2 stops after {lifecyclePolicy.cloud_idle_stop_minutes}m
+                                                        {lifecyclePolicy.cloud_idle_terminate_minutes > 0
+                                                            ? ` | EC2 terminates after ${lifecyclePolicy.cloud_idle_terminate_minutes}m`
+                                                            : ""}
+                                                    </>
+                                                ) : null}
+                                            </p>
+                                        ) : null}
+                                    </div>
                                     {isLoadingEnvironments ? (
                                         <p className="mt-1 text-sm text-slate-400">Loading environments...</p>
                                     ) : environments.length === 0 ? (
@@ -1028,7 +1056,9 @@ export function DashboardPage() {
                                                                             : env.cloud_status === "provisioning" ||
                                                                                 env.cloud_status === "deprovisioning"
                                                                               ? "text-amber-300"
-                                                                              : "text-rose-400"
+                                                                              : env.cloud_status === "cloud_stopped"
+                                                                                ? "text-sky-300"
+                                                                                : "text-rose-400"
                                                                     }`}
                                                                 >
                                                                     {env.cloud_error}
@@ -1042,6 +1072,16 @@ export function DashboardPage() {
                                                                     {" | "}
                                                                     Workspace {remoteHealth.workspace_ready ? "ok" : "down"}
                                                                     {remoteHealth.error ? ` — ${remoteHealth.error}` : ""}
+                                                                </p>
+                                                            ) : null}
+                                                            {capabilities.showCloudIdleBillingWarning ? (
+                                                                <p className="text-xs text-amber-400">
+                                                                    Workspace is stopped but EC2 is still running. Billing continues until the idle cloud policy stops the instance.
+                                                                </p>
+                                                            ) : null}
+                                                            {capabilities.showCloudStoppedIndicator ? (
+                                                                <p className="text-xs text-sky-300">
+                                                                    EC2 is stopped to save compute cost. Use Start to wake the instance and workspace.
                                                                 </p>
                                                             ) : null}
                                                             {capabilities.showRemoteBootstrapHint ? (

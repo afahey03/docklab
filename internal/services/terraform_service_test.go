@@ -18,10 +18,11 @@ func TestWriteTerraformWorkspaceIncludesEnvironmentID(t *testing.T) {
 	}
 
 	err := writeTerraformWorkspace(dir, cfg, "env-123", ProvisionRequest{
-		Region:       "us-east-1",
-		InstanceType: "t3.micro",
-		AMI:          "ami-0c2b8ca1dad447f8a",
-		KeyName:      "docklab-key",
+		Region:         "us-east-1",
+		InstanceType:   "t3.micro",
+		AMI:            "ami-0c2b8ca1dad447f8a",
+		KeyName:        "docklab-key",
+		WorkspaceImage: "alpine:3.20",
 	})
 	if err != nil {
 		t.Fatalf("writeTerraformWorkspace failed: %v", err)
@@ -39,5 +40,8 @@ func TestWriteTerraformWorkspaceIncludesEnvironmentID(t *testing.T) {
 
 	if vars["environment_id"] != "env-123" {
 		t.Fatalf("expected environment_id env-123, got %q", vars["environment_id"])
+	}
+	if vars["workspace_image"] != "alpine:3.20" {
+		t.Fatalf("expected workspace_image alpine:3.20, got %q", vars["workspace_image"])
 	}
 }

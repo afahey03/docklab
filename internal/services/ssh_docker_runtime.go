@@ -37,7 +37,7 @@ func (r *SSHDockerRuntime) runDocker(ctx context.Context, args ...string) (strin
 		quoted[i] = shellQuote(arg)
 	}
 	command := "docker " + strings.Join(quoted, " ")
-	return r.factory.Run(ctx, r.host, command)
+	return r.factory.Run(ctx, r.host, remoteShellCommand(command))
 }
 
 func (r *SSHDockerRuntime) CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error) {

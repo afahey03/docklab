@@ -20,7 +20,10 @@ import {
     type RemoteHealthStatus,
 } from "../lib/api";
 import { clearToken, getToken } from "../lib/auth";
-import { getEnvironmentCapabilities } from "../lib/environmentCapabilities";
+import {
+    getEnvironmentCapabilities,
+    hasTransitioningCloudEnvironments,
+} from "../lib/environmentCapabilities";
 
 type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud" | "retry_bootstrap";
 type ConfirmAction = "delete_environment" | "destroy_cloud";
@@ -376,9 +379,11 @@ export function DashboardPage() {
     }, [navigate]);
 
     useEffect(() => {
-        const refreshInterval = environments.some((environment) => environment.status === "running")
-            ? RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS
-            : IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS;
+        const refreshInterval =
+            environments.some((environment) => environment.status === "running") ||
+            hasTransitioningCloudEnvironments(environments)
+                ? RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS
+                : IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS;
 
         const intervalID = window.setInterval(() => {
             void refreshEnvironments().catch(() => {
@@ -1004,7 +1009,18 @@ export function DashboardPage() {
                                                                 </p>
                                                             ) : null}
                                                             {env.cloud_error ? (
-                                                                <p className="text-xs text-rose-400">{env.cloud_error}</p>
+                                                                <p
+                                                                    className={`text-xs ${
+                                                                        env.cloud_status === "provision_failed"
+                                                                            ? "text-rose-400"
+                                                                            : env.cloud_status === "provisioning" ||
+                                                                                env.cloud_status === "deprovisioning"
+                                                                              ? "text-amber-300"
+                                                                              : "text-rose-400"
+                                                                    }`}
+                                                                >
+                                                                    {env.cloud_error}
+                                                                </p>
                                                             ) : null}
                                                             {remoteHealth ? (
                                                                 <p className="text-xs text-slate-500">

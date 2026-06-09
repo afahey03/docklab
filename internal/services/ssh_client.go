@@ -117,7 +117,6 @@ func (f *SSHClientFactory) WaitForSSH(ctx context.Context, host string) error {
 		deadline = time.Now().Add(f.cfg.BootstrapMax)
 	}
 
-	backoff := 5 * time.Second
 	for {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for ssh on %s", host)
@@ -135,7 +134,7 @@ func (f *SSHClientFactory) WaitForSSH(ctx context.Context, host string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(sshBootstrapPollInterval):
 		}
 	}
 }
@@ -146,13 +145,12 @@ func (f *SSHClientFactory) WaitForDocker(ctx context.Context, host string) error
 		deadline = time.Now().Add(f.cfg.BootstrapMax)
 	}
 
-	backoff := 5 * time.Second
 	for {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for docker on %s", host)
 		}
 
-		_, err := f.Run(ctx, host, "docker info >/dev/null 2>&1")
+		_, err := f.Run(ctx, host, remoteShellCommand("docker info >/dev/null 2>&1"))
 		if err == nil {
 			return nil
 		}
@@ -163,7 +161,7 @@ func (f *SSHClientFactory) WaitForDocker(ctx context.Context, host string) error
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(sshBootstrapPollInterval):
 		}
 	}
 }
@@ -177,6 +175,12 @@ func UsesRemoteRuntime(env *models.Environment) bool {
 
 const runtimeTargetLocal = "local"
 const runtimeTargetRemote = "remote"
+
+const sshBootstrapPollInterval = 2 * time.Second
+
+func remoteShellCommand(command string) string {
+	return "LC_ALL=C bash --noprofile --norc -c " + shellQuote(command)
+}
 
 func isNonRetryableSSHError(err error) bool {
 	if err == nil {

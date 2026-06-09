@@ -19,6 +19,10 @@ export type EnvironmentCapabilities = {
 
 const transitionalCloudStatuses = new Set(["provisioning", "deprovisioning"]);
 
+export function hasTransitioningCloudEnvironments(environments: Environment[]): boolean {
+    return environments.some((env) => transitionalCloudStatuses.has(env.cloud_status || "not_provisioned"));
+}
+
 export function hasCloudInstance(env: Environment): boolean {
     return Boolean(env.instance_id);
 }

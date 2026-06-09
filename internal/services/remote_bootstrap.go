@@ -16,6 +16,8 @@ type RemoteHealthStatus struct {
 	Error           string `json:"error,omitempty"`
 }
 
+type BootstrapProgressFunc func(message string)
+
 type RemoteBootstrapService struct {
 	resolver *RuntimeResolver
 }
@@ -24,7 +26,7 @@ func NewRemoteBootstrapService(resolver *RuntimeResolver) *RemoteBootstrapServic
 	return &RemoteBootstrapService{resolver: resolver}
 }
 
-func (s *RemoteBootstrapService) BootstrapAfterProvision(ctx context.Context, env *models.Environment) (remoteContainerID string, err error) {
+func (s *RemoteBootstrapService) BootstrapAfterProvision(ctx context.Context, env *models.Environment, onProgress BootstrapProgressFunc) (remoteContainerID string, err error) {
 	if env == nil {
 		return "", fmt.Errorf("environment is nil")
 	}
@@ -37,13 +39,17 @@ func (s *RemoteBootstrapService) BootstrapAfterProvision(ctx context.Context, en
 		return "", ErrSSHPrivateKeyMissing
 	}
 
+	reportProgress(onProgress, "waiting for SSH on EC2")
 	if err := factory.WaitForSSH(ctx, env.PublicIP); err != nil {
 		return "", fmt.Errorf("wait for ssh: %w", err)
 	}
+
+	reportProgress(onProgress, "waiting for Docker on EC2")
 	if err := factory.WaitForDocker(ctx, env.PublicIP); err != nil {
 		return "", fmt.Errorf("wait for docker: %w", err)
 	}
 
+	reportProgress(onProgress, fmt.Sprintf("starting remote workspace container (%s)", env.Image))
 	remoteRuntime := NewSSHDockerRuntime(factory, env.PublicIP)
 	containerID, err := remoteRuntime.EnsureWorkspace(ctx, env.ID, env.Image, map[string]string{
 		"docklab.user_email":     env.UserEmail,
@@ -82,7 +88,7 @@ func (s *RemoteBootstrapService) CheckHealth(ctx context.Context, env *models.En
 	_ = client.Close()
 	status.SSHReachable = true
 
-	if _, err := factory.Run(ctx, env.PublicIP, "docker info >/dev/null 2>&1"); err != nil {
+	if _, err := factory.Run(ctx, env.PublicIP, remoteShellCommand("docker info >/dev/null 2>&1")); err != nil {
 		status.Error = err.Error()
 		return status
 	}
@@ -90,7 +96,8 @@ func (s *RemoteBootstrapService) CheckHealth(ctx context.Context, env *models.En
 	status.DockerAvailable = true
 
 	workspaceName := RemoteContainerName(env.ID)
-	if _, err := factory.Run(ctx, env.PublicIP, fmt.Sprintf("docker inspect -f '{{.State.Running}}' %s", shellQuote(workspaceName))); err == nil {
+	inspectCommand := fmt.Sprintf("docker inspect -f '{{.State.Running}}' %s", workspaceName)
+	if _, err := factory.Run(ctx, env.PublicIP, remoteShellCommand(inspectCommand)); err == nil {
 		status.WorkspaceReady = true
 	}
 
@@ -106,6 +113,12 @@ func (s *RemoteBootstrapService) CheckHealth(ctx context.Context, env *models.En
 	}
 
 	return status
+}
+
+func reportProgress(onProgress BootstrapProgressFunc, message string) {
+	if onProgress != nil {
+		onProgress(message)
+	}
 }
 
 func (s *RemoteBootstrapService) RevertToLocal(ctx context.Context, env *models.Environment) (localContainerID string, err error) {

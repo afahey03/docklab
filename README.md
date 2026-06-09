@@ -67,7 +67,7 @@ plan/                      # Project plan and sprint tracking
 - Typed provisioning validation errors (`code` + `error`)
 - Local Docker workspace lifecycle via `docker` CLI
 - Remote Docker workspace lifecycle over SSH when `runtime_target = remote`
-- Post-provision bootstrap: wait for SSH/Docker, ensure remote container by name (`docklab-{environment_id}`), switch runtime target
+- Post-provision bootstrap: wait for SSH/Docker (2s poll interval), pre-pull workspace image in EC2 user-data, ensure remote container by name (`docklab-{environment_id}`), switch runtime target; dashboard shows live bootstrap phase in `cloud_error`
 - PTY-backed browser terminal (`GET /api/v1/environments/:id/terminal/ws`) — local or remote via SSH
 - Structured JSON logging (`log/slog`)
 - Cloud drift/orphan reconciliation (runs on startup and every 5 minutes)
@@ -83,7 +83,7 @@ plan/                      # Project plan and sprint tracking
 - **Upgrade to cloud** modal on local workspaces (region, instance type, AMI, key pair)
 - Environment create/start/stop/delete/upgrade-to-cloud/terminate controls with context-aware button availability
 - Separate workspace and cloud status badges on environment cards
-- Runtime target and remote health indicators (including workspace container readiness)
+- Runtime target and remote health indicators (including workspace container readiness); 5s dashboard refresh while cloud provisioning is in progress
 - **Complete remote setup** / **Retry remote setup** when bootstrap is incomplete or failed
 - Async operation polling with progress feedback
 - In-app confirmation modals for destructive actions

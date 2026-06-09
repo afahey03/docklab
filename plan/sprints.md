@@ -135,7 +135,7 @@ Make provisioned EC2 instances usable as actual remote development workspaces.
 - Terraform EC2 template: security group (SSH ingress), Docker install user-data, public IP
 - `SSHDockerRuntime`: remote container create/start/stop/delete over SSH
 - `RuntimeResolver`: routes lifecycle and terminal to local or remote based on `runtime_target`
-- Post-provision bootstrap: wait for SSH + Docker, create remote workspace, remove local container, set `runtime_target = remote`
+- Post-provision bootstrap: wait for SSH + Docker (2s poll), pre-pull workspace image in EC2 user-data, phased progress messages, create remote workspace, remove local container, set `runtime_target = remote`
 - Remote browser terminal: SSH PTY session running `docker exec` on EC2
 - `GET /api/v1/environments/:id/remote-health` — SSH reachability and Docker daemon checks
 - Environment model: `runtime_target`, `cloud_key_name` columns

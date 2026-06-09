@@ -15,10 +15,11 @@ var ErrTerraformUnavailable = errors.New("terraform CLI is not installed or unav
 var ErrTerraformStateBackendConfigMissing = errors.New("terraform state backend configuration is incomplete")
 
 type ProvisionRequest struct {
-	Region       string
-	InstanceType string
-	AMI          string
-	KeyName      string
+	Region         string
+	InstanceType   string
+	AMI            string
+	KeyName        string
+	WorkspaceImage string
 }
 
 type ProvisionResult struct {
@@ -345,11 +346,12 @@ func writeTerraformWorkspace(dir string, backendConfig terraformBackendConfig, e
 
 	req = normalizeProvisionRequest(req)
 	vars := map[string]string{
-		"aws_region":     req.Region,
-		"instance_type":  req.InstanceType,
-		"ami_id":         req.AMI,
-		"key_name":       req.KeyName,
-		"environment_id": environmentID,
+		"aws_region":       req.Region,
+		"instance_type":    req.InstanceType,
+		"ami_id":           req.AMI,
+		"key_name":         req.KeyName,
+		"environment_id":   environmentID,
+		"workspace_image":  req.WorkspaceImage,
 	}
 	varBytes, err := json.Marshal(vars)
 	if err != nil {
@@ -378,6 +380,7 @@ func loadTerraformVarsFromDir(dir string) ProvisionRequest {
 	req.InstanceType = vars["instance_type"]
 	req.AMI = vars["ami_id"]
 	req.KeyName = vars["key_name"]
+	req.WorkspaceImage = vars["workspace_image"]
 	return req
 }
 
@@ -436,6 +439,11 @@ variable "environment_id" {
   type = string
 }
 
+variable "workspace_image" {
+  type    = string
+  default = ""
+}
+
 data "aws_vpc" "default" {
   default = true
 }
@@ -492,6 +500,9 @@ resource "aws_instance" "docklab" {
                 systemctl enable docker
                 systemctl start docker
                 usermod -aG docker ubuntu
+              fi
+              if [ -n "${var.workspace_image}" ]; then
+                docker pull "${var.workspace_image}"
               fi
               EOF
 

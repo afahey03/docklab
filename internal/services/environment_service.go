@@ -242,7 +242,11 @@ func (s *EnvironmentService) completeRemoteBootstrap(ctx context.Context, id, us
 	bootstrapCtx, bootstrapCancel := context.WithTimeout(ctx, s.resolver.BootstrapTimeout())
 	defer bootstrapCancel()
 
-	remoteContainerID, bootstrapErr := s.bootstrap.BootstrapAfterProvision(bootstrapCtx, env)
+	onProgress := func(message string) {
+		s.reportBootstrapProgress(bootstrapCtx, env, message)
+	}
+
+	remoteContainerID, bootstrapErr := s.bootstrap.BootstrapAfterProvision(bootstrapCtx, env, onProgress)
 	if bootstrapErr != nil {
 		if env.RuntimeTarget != runtimeTargetRemote {
 			failedEnv, updateErr := s.repo.UpdateProvisioning(
@@ -669,6 +673,7 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 	provisionCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
+	req.WorkspaceImage = env.Image
 	result, err := s.terraformRunner.ProvisionEC2(provisionCtx, env.ID, req, env.TerraformDir)
 	if err != nil {
 		failedTerraformDir := env.TerraformDir
@@ -744,6 +749,26 @@ func (s *EnvironmentService) clearBlockingOperations(ctx context.Context, env *m
 	if env.InstanceID != "" && env.RuntimeTarget != runtimeTargetRemote {
 		_, _ = s.operationRepo.FailInProgressForEnvironment(ctx, env.ID, env.UserEmail, "cleared incomplete remote bootstrap to allow environment management")
 	}
+}
+
+func (s *EnvironmentService) reportBootstrapProgress(ctx context.Context, env *models.Environment, message string) {
+	if env == nil {
+		return
+	}
+	_, _ = s.repo.UpdateProvisioning(
+		ctx,
+		env.ID,
+		env.UserEmail,
+		cloudProvisioning,
+		env.CloudRegion,
+		env.CloudInstanceType,
+		env.CloudKeyName,
+		env.InstanceID,
+		env.PublicIP,
+		env.TerraformDir,
+		message,
+		env.CloudProvisionedAt,
+	)
 }
 
 func generateEnvironmentName(userEmail string) string {

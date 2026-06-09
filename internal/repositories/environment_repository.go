@@ -13,7 +13,7 @@ import (
 var ErrEnvironmentNotFound = errors.New("environment not found")
 
 type EnvironmentRepository interface {
-	Create(ctx context.Context, userEmail, name, image, status, containerID string) (*models.Environment, error)
+	Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode string) (*models.Environment, error)
 	ListByUserEmail(ctx context.Context, userEmail string) ([]models.Environment, error)
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Environment, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status string) (*models.Environment, error)
@@ -38,7 +38,7 @@ func NewPostgresEnvironmentRepository(db *pgxpool.Pool) *PostgresEnvironmentRepo
 }
 
 // envColumns is the canonical ordered column list used in all SELECT/RETURNING clauses.
-const envColumns = `id, user_email, name, image, status, container_id, runtime_target, cloud_status, cloud_region, cloud_instance_type, cloud_key_name, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
+const envColumns = `id, user_email, name, image, status, container_id, creation_mode, runtime_target, cloud_status, cloud_region, cloud_instance_type, cloud_key_name, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
 
 func scanEnv(row interface {
 	Scan(dest ...any) error
@@ -50,6 +50,7 @@ func scanEnv(row interface {
 		&env.Image,
 		&env.Status,
 		&env.ContainerID,
+		&env.CreationMode,
 		&env.RuntimeTarget,
 		&env.CloudStatus,
 		&env.CloudRegion,
@@ -66,18 +67,22 @@ func scanEnv(row interface {
 	)
 }
 
-func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID string) (*models.Environment, error) {
+func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode string) (*models.Environment, error) {
 	if r.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
 
+	if creationMode == "" {
+		creationMode = "local"
+	}
+
 	query := `
-		INSERT INTO environments (user_email, name, image, status, container_id)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO environments (user_email, name, image, status, container_id, creation_mode)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING ` + envColumns
 
 	var env models.Environment
-	if err := scanEnv(r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID), &env); err != nil {
+	if err := scanEnv(r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID, creationMode), &env); err != nil {
 		return nil, err
 	}
 	return &env, nil

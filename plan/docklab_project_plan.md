@@ -26,7 +26,9 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 |------|-------------|
 | **Foundation** | Go (Gin) backend, React (Vite) frontend, PostgreSQL, Docker Compose, structured logging |
 | **Authentication** | Register, login, JWT middleware, bcrypt, protected routes, CORS |
-| **Local environments** | Create/list/start/stop/delete Docker workspaces per user |
+| **Local environments** | Create/list/start/stop/delete local Docker workspaces (`creation_mode = local`) |
+| **Cloud environments** | Create cloud workspaces at create time (`creation_mode = cloud`); EC2 + remote bootstrap in one async flow |
+| **Local → cloud upgrade** | Optional `POST .../provision` on local workspaces to attach EC2 |
 | **Remote orchestration** | SSH + remote Docker lifecycle, post-provision bootstrap, runtime routing, remote health API |
 | **Browser terminal** | WebSocket + PTY + xterm.js — local docker exec or remote SSH docker exec |
 | **Terraform provisioning** | EC2 with SG + Docker user-data, S3 state + DynamoDB locking, async operations |

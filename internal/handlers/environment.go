@@ -19,8 +19,15 @@ type EnvironmentHandler struct {
 }
 
 type CreateEnvironmentRequest struct {
-	Name  string `json:"name"`
-	Image string `json:"image"`
+	Name      string                       `json:"name"`
+	Image     string                       `json:"image"`
+	Target    string                       `json:"target"`
+	Provision *ProvisionEnvironmentRequest `json:"provision"`
+}
+
+type CreateEnvironmentResponse struct {
+	Environment interface{} `json:"environment"`
+	Operation   interface{} `json:"operation,omitempty"`
 }
 
 type ProvisionEnvironmentRequest struct {
@@ -42,13 +49,34 @@ func (h *EnvironmentHandler) Create(c *gin.Context) {
 	}
 
 	userEmail := c.GetString("user_email")
-	env, err := h.environmentService.CreateEnvironment(c.Request.Context(), userEmail, req.Name, req.Image)
+	input := services.CreateEnvironmentInput{
+		Name:   req.Name,
+		Image:  req.Image,
+		Target: req.Target,
+	}
+	if req.Provision != nil {
+		input.Provision = services.ProvisionRequest{
+			Region:       req.Provision.Region,
+			InstanceType: req.Provision.InstanceType,
+			AMI:          req.Provision.AMI,
+			KeyName:      req.Provision.KeyName,
+		}
+	}
+
+	result, err := h.environmentService.CreateEnvironment(c.Request.Context(), userEmail, input)
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, env)
+	response := CreateEnvironmentResponse{Environment: result.Environment}
+	if result.Operation != nil {
+		response.Operation = result.Operation
+		c.JSON(http.StatusAccepted, response)
+		return
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 func (h *EnvironmentHandler) List(c *gin.Context) {
@@ -221,6 +249,10 @@ func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	}
 	if errors.Is(err, services.ErrRemoteRuntimeUnavailable) {
 		c.JSON(http.StatusConflict, APIErrorResponse{Code: "remote_runtime_unavailable", Error: err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrCloudAlreadyProvisioned) {
+		c.JSON(http.StatusConflict, APIErrorResponse{Code: "cloud_already_provisioned", Error: err.Error()})
 		return
 	}
 

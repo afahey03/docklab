@@ -23,6 +23,7 @@ export type Environment = {
     image: string;
     status: string;
     container_id: string;
+    creation_mode: string;
     runtime_target: string;
     cloud_status: string;
     cloud_region: string;
@@ -45,6 +46,18 @@ export type RemoteHealthStatus = {
     docker_available: boolean;
     workspace_ready?: boolean;
     error?: string;
+};
+
+export type CreateEnvironmentRequest = {
+    name?: string;
+    image: string;
+    target?: "local" | "cloud";
+    provision?: ProvisionRequest;
+};
+
+export type CreateEnvironmentResponse = {
+    environment: Environment;
+    operation?: Operation;
 };
 
 export type ProvisionRequest = {
@@ -148,13 +161,15 @@ export async function getEnvironments(): Promise<Environment[]> {
     return body.environments;
 }
 
-export async function createEnvironment(name: string, image: string): Promise<Environment> {
-    return request<Environment>("/api/v1/environments", {
+export async function createEnvironment(payload: CreateEnvironmentRequest): Promise<CreateEnvironmentResponse> {
+    return request<CreateEnvironmentResponse>("/api/v1/environments", {
         method: "POST",
         headers: withAuthHeaders(),
         body: JSON.stringify({
-            name: name.trim(),
-            image: image.trim(),
+            name: payload.name?.trim() ?? "",
+            image: payload.image.trim(),
+            target: payload.target ?? "local",
+            provision: payload.provision,
         }),
     });
 }

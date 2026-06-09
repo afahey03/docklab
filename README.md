@@ -10,7 +10,7 @@ Cloud-based remote development environment platform. Users authenticate, manage 
 
 **MVP complete through Sprint 7 (June 2026).** The platform supports auth, local and remote Docker workspaces, browser terminals (local or over SSH), Terraform EC2 provisioning with post-provision bootstrap, idle auto-stop, estimated cloud usage/cost visibility, and remote health checks.
 
-**Core remote-dev flow works when AWS and SSH are configured.** Environments start locally; after provisioning EC2 with a matching key pair, DockLab bootstraps Docker on the instance, migrates the workspace remotely, and routes the browser terminal over SSH. See [Known limitations](#known-limitations) for remaining gaps.
+**Core remote-dev flow works when AWS and SSH are configured.** At create time, choose a **local Docker workspace** or a **cloud workspace (EC2)**. Cloud environments provision EC2 and bootstrap the remote container in one async flow — no throwaway local container first. Local environments can optionally be upgraded to EC2 later. See [Known limitations](#known-limitations) for remaining gaps.
 
 ## Architecture
 
@@ -18,8 +18,8 @@ Cloud-based remote development environment platform. Users authenticate, manage 
 React Frontend (Vite + TypeScript + Tailwind)
     ↓
 Go API Server (Gin)
-    ├── Docker CLI  →  Local workspace containers (default)
-    └── Terraform CLI  →  AWS EC2 (Docker via user-data, SSH access)
+    ├── Docker CLI  →  Local workspace containers (when target = local)
+    └── Terraform CLI  →  AWS EC2 (when target = cloud or upgrade from local)
               ↓ SSH + remote Docker CLI
          Workspace container on EC2 (runtime_target = remote)
     ↓
@@ -52,7 +52,7 @@ plan/                      # Project plan and sprint tracking
 - JWT auth: `/api/v1/auth/register`, `/api/v1/auth/login`, protected `/api/v1/auth/me`
 - Password hashing with bcrypt
 - Environment lifecycle APIs:
-  - `POST /api/v1/environments` — create
+  - `POST /api/v1/environments` — create (`target`: `local` or `cloud`; cloud requires `provision` payload; returns `201` for local, `202` with operation for cloud)
   - `GET /api/v1/environments` — list
   - `GET /api/v1/environments/:id` — get one
   - `POST /api/v1/environments/:id/start` — start container
@@ -60,8 +60,8 @@ plan/                      # Project plan and sprint tracking
   - `DELETE /api/v1/environments/:id` — delete environment (async; tears down cloud resources)
 - Remote health: `GET /api/v1/environments/:id/remote-health` (SSH, Docker daemon, and workspace container readiness)
 - Retry remote bootstrap: `POST /api/v1/environments/:id/retry-bootstrap` (adopts existing remote container when present)
-- Terraform provisioning: `POST /api/v1/environments/:id/provision` (requires EC2 key pair name; blocked when EC2 already exists)
-- Cloud-only termination: `POST /api/v1/environments/:id/destroy-cloud` (reverts workspace to local Docker)
+- Terraform provisioning: `POST /api/v1/environments/:id/provision` — upgrade a **local** workspace to EC2 (blocked for cloud-created environments and when EC2 already exists)
+- Cloud-only termination: `POST /api/v1/environments/:id/destroy-cloud` (cloud-created envs stay cloud-only; local-upgraded envs revert to local Docker)
 - Async operation status: `GET /api/v1/operations/:id`
 - Postgres-persisted operation tracking (survives backend restarts)
 - Typed provisioning validation errors (`code` + `error`)
@@ -72,14 +72,16 @@ plan/                      # Project plan and sprint tracking
 - Structured JSON logging (`log/slog`)
 - Cloud drift/orphan reconciliation (runs on startup and every 5 minutes)
 - Auto-sleep lifecycle worker: stops idle running environments (local or remote container) after `IDLE_STOP_AFTER_MINUTES` (default 60); terminal sessions refresh `last_activity_at` every 60 s
-- Persisted cloud usage metadata (`cloud_instance_type`, `cloud_provisioned_at`, `cloud_key_name`, `runtime_target`) for dashboard visibility
+- Persisted cloud usage metadata (`creation_mode`, `cloud_instance_type`, `cloud_provisioned_at`, `cloud_key_name`, `runtime_target`) for dashboard visibility
 
 ## Frontend features
 
 - Login, register, and JWT token persistence
 - Protected `/dashboard` route
-- Dashboard views: **Environments**, **Usage & Cost**, **Settings** (cloud provisioning defaults)
-- Environment create/start/stop/delete/provision/terminate controls with context-aware button availability
+- Dashboard views: **Environments**, **Usage & Cost**
+- Create environment with **Local workspace** or **Cloud workspace (EC2)** toggle and inline cloud settings
+- **Upgrade to cloud** modal on local workspaces (region, instance type, AMI, key pair)
+- Environment create/start/stop/delete/upgrade-to-cloud/terminate controls with context-aware button availability
 - Separate workspace and cloud status badges on environment cards
 - Runtime target and remote health indicators (including workspace container readiness)
 - **Complete remote setup** / **Retry remote setup** when bootstrap is incomplete or failed
@@ -117,7 +119,7 @@ Provisioning requires two related but different values:
 
 | Setting | Example | Meaning |
 |---------|---------|---------|
-| **Key pair name** (dashboard Settings) | `docklab-key` | Name of the key pair **registered in AWS EC2** in your target region |
+| **Key pair name** (create or upgrade modal) | `docklab-key` | Name of the key pair **registered in AWS EC2** in your target region |
 | **Private key path** (`DOKLAB_SSH_PRIVATE_KEY_PATH`) | `./docklab-key.pem` | Local file path to the matching **private** key |
 
 Do not put `.pem` in the key pair name — that is only the local filename.
@@ -205,17 +207,18 @@ Used variables:
 2. Start the frontend dev server from the `frontend/` folder.
 3. Open `http://localhost:5173` in your browser.
 4. Create an account on `/register` and sign in on `/login`.
-5. Use the dashboard to create and manage environments (local Docker by default).
+5. Use the dashboard to create a **local workspace** or **cloud workspace (EC2)**.
 6. Open **Terminal** on a running environment to run shell commands from the browser.
-7. Under **Settings**, set cloud defaults including a **required EC2 key pair name**, then use **Provision**.
-8. After provisioning succeeds, the environment switches to `runtime_target = remote` and the terminal connects over SSH to the EC2 workspace.
-9. Use **Check remote health** to verify SSH and Docker on provisioned environments.
-10. Use **Terminate EC2** to destroy cloud resources and revert the workspace to local Docker.
-11. Use **Delete** to remove both the environment and any provisioned cloud resources.
-12. Long-running cloud actions run asynchronously; the dashboard polls operation status until completion.
-13. Operation status is persisted in PostgreSQL, so polling survives backend restarts.
-14. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped (local or remote container).
-15. The **Usage & Cost** view estimates EC2 runtime spend for provisioned environments.
+7. For local workspaces, click **Upgrade to cloud** and fill in the provision modal to attach EC2.
+8. Cloud workspaces provision EC2 asynchronously at create time; poll until the operation succeeds.
+9. After cloud provisioning succeeds, the environment uses `runtime_target = remote` and the terminal connects over SSH.
+10. Use **Check remote health** to verify SSH, Docker, and workspace container readiness.
+11. Use **Terminate EC2** to destroy cloud resources (local-upgraded envs revert to local Docker; cloud-created envs stay cloud-only).
+12. Use **Delete** to remove both the environment and any provisioned cloud resources.
+13. Long-running cloud actions run asynchronously; the dashboard polls operation status until completion.
+14. Operation status is persisted in PostgreSQL, so polling survives backend restarts.
+15. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped (local or remote container).
+16. The **Usage & Cost** view estimates EC2 runtime spend for provisioned environments.
 
 Terminal tips:
 
@@ -254,16 +257,16 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 
 1. Start PostgreSQL and the backend with `docker compose up --build`.
 2. Start the frontend with `cd frontend && npm run dev`.
-3. Log in and create a local environment.
-4. Open the terminal and confirm shell access in the local container.
-5. Configure `DOKLAB_SSH_PRIVATE_KEY_PATH` and set the matching key pair name under **Settings**.
-6. Provision with a valid AWS region, AMI, instance type, credentials, and key pair name.
-7. Confirm the operation advances from `queued` → `running` → `succeeded`.
-8. Verify the environment card shows `runtime_target = remote`, `provisioned`, instance ID, and public IP.
-9. Use **Check remote health** — SSH and Docker should report ok.
-10. Open the terminal and run commands on the remote workspace container.
-11. Verify **Usage & Cost** shows the provisioned environment and a non-zero rate estimate.
-12. Use **Terminate EC2** and confirm cloud resources are removed and runtime reverts to local.
+3. Log in and create a **local workspace**; open the terminal and confirm shell access.
+4. Create a **cloud workspace (EC2)** with valid region, AMI, instance type, and key pair name.
+5. Configure `DOKLAB_SSH_PRIVATE_KEY_PATH` and use the matching key pair name in the create or upgrade modal.
+6. Confirm the cloud create operation advances from `queued` → `running` → `succeeded`.
+7. Verify the cloud environment card shows `creation_mode = cloud`, `runtime_target = remote`, `provisioned`, instance ID, and public IP.
+8. Use **Check remote health** — SSH, Docker, and workspace should report ok.
+9. Open the terminal and run commands on the remote workspace container.
+10. Create a local workspace and use **Upgrade to cloud** via the provision modal; confirm it switches to remote runtime.
+11. Verify **Usage & Cost** shows provisioned environments and non-zero rate estimates.
+12. Use **Terminate EC2** on a cloud-created env (stays cloud-only) and on an upgraded local env (reverts to local Docker).
 13. Use **Delete** and confirm both the environment row and EC2 resources are removed.
 
 ## Roadmap

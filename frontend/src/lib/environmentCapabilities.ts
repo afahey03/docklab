@@ -27,6 +27,14 @@ export function isRemoteRuntime(env: Environment): boolean {
     return env.runtime_target === "remote";
 }
 
+export function isCloudCreation(env: Environment): boolean {
+    return env.creation_mode === "cloud";
+}
+
+export function isPlaceholderContainer(env: Environment): boolean {
+    return env.container_id.startsWith("pending-");
+}
+
 export function needsRemoteBootstrap(env: Environment): boolean {
     return hasCloudInstance(env) && !isRemoteRuntime(env);
 }
@@ -52,12 +60,15 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
     const isRunning = env.status === "running";
     const isProvisioned = cloudStatus === "provisioned";
     const isProvisionFailed = cloudStatus === "provision_failed";
+    const workspacePending = isPlaceholderContainer(env);
     const canRepairRemoteWorkspace = !isPending && needsRemoteRepair(env) && !isTransitioning;
 
     const canProvision =
         !isPending &&
+        !isCloudCreation(env) &&
         !hasInstance &&
         !isTransitioning &&
+        !workspacePending &&
         (cloudStatus === "not_provisioned" || cloudStatus === "provision_failed");
 
     const canTerminateEC2 = !isPending && hasInstance && !isTransitioning;
@@ -65,25 +76,29 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
     const canOpenTerminal =
         !isPending &&
         isRunning &&
+        !workspacePending &&
+        !isTransitioning &&
         (env.runtime_target === "local" || (isRemote && isProvisioned && !env.cloud_error));
 
-    let provisionLabel = "Provision";
+    let provisionLabel = "Upgrade to cloud";
     if (isPending) {
         provisionLabel = "Provisioning...";
     } else if (isProvisioned || (isRemote && hasInstance)) {
-        provisionLabel = "Provisioned";
+        provisionLabel = "Cloud attached";
     } else if (isTransitioning) {
         provisionLabel = "Cloud busy";
     } else if (!canProvision && hasInstance) {
         provisionLabel = "EC2 exists";
+    } else if (isCloudCreation(env)) {
+        provisionLabel = "Cloud workspace";
     }
 
     const repairRemoteLabel = needsRemoteBootstrap(env) ? "Complete remote setup" : "Retry remote setup";
 
     return {
-        canStart: !isPending && env.status === "stopped",
-        canStop: !isPending && env.status === "running",
-        canDelete: !isPending,
+        canStart: !isPending && env.status === "stopped" && !isTransitioning && !workspacePending,
+        canStop: !isPending && env.status === "running" && !workspacePending,
+        canDelete: !isPending && !isTransitioning,
         canOpenTerminal,
         canProvision,
         canRepairRemoteWorkspace,
@@ -93,7 +108,7 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
         showRemoteBootstrapHint: needsRemoteBootstrap(env),
         provisionLabel,
         repairRemoteLabel,
-        workspaceStatusLabel: env.status,
-        cloudStatusLabel: hasInstance ? cloudStatus : "not_provisioned",
+        workspaceStatusLabel: isTransitioning ? cloudStatus : env.status,
+        cloudStatusLabel: isCloudCreation(env) || hasInstance ? cloudStatus : "not_provisioned",
     };
 }

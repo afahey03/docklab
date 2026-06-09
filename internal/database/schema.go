@@ -123,5 +123,13 @@ func EnsureSchema(pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to ensure remote runtime columns: %w", err)
 	}
 
+	const creationModeColumn = `
+		ALTER TABLE environments ADD COLUMN IF NOT EXISTS creation_mode TEXT NOT NULL DEFAULT 'local';
+	`
+
+	if _, err := pool.Exec(ctx, creationModeColumn); err != nil {
+		return fmt.Errorf("failed to ensure creation_mode column: %w", err)
+	}
+
 	return nil
 }

@@ -24,7 +24,29 @@ import { getEnvironmentCapabilities } from "../lib/environmentCapabilities";
 
 type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud" | "retry_bootstrap";
 type ConfirmAction = "delete_environment" | "destroy_cloud";
-type DashboardView = "environments" | "usage" | "settings";
+type DashboardView = "environments" | "usage";
+type CreateTarget = "local" | "cloud";
+
+type CloudProvisionFields = {
+    region: string;
+    instanceType: string;
+    ami: string;
+    keyName: string;
+};
+
+type UpgradeProvisionDialogState = {
+    open: boolean;
+    environmentId: string;
+    environmentName: string;
+    provision: CloudProvisionFields;
+};
+
+const DEFAULT_CLOUD_PROVISION: CloudProvisionFields = {
+    region: "us-east-1",
+    instanceType: "t3.micro",
+    ami: "ami-0c2b8ca1dad447f8a",
+    keyName: "",
+};
 
 type ConfirmDialogState = {
     open: boolean;
@@ -103,6 +125,72 @@ function formatRuntimeHours(hours: number | null): string {
     return `${minutes}m`;
 }
 
+function validateCloudProvisionFields(provision: CloudProvisionFields): string | null {
+    if (!provision.region.trim()) {
+        return "aws region is required";
+    }
+    if (!provision.instanceType.trim()) {
+        return "instance type is required";
+    }
+    if (!provision.ami.trim()) {
+        return "AMI ID is required";
+    }
+    if (!provision.keyName.trim()) {
+        return "EC2 key pair name is required for remote SSH access";
+    }
+    return null;
+}
+
+const darkFieldClassName =
+    "rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 outline-none ring-cyan-500 focus:ring";
+
+function CloudProvisionFieldsForm({
+    provision,
+    onChange,
+    idPrefix,
+}: {
+    provision: CloudProvisionFields;
+    onChange: (next: CloudProvisionFields) => void;
+    idPrefix: string;
+}) {
+    return (
+        <div className="grid gap-3 md:grid-cols-2">
+            <input
+                id={`${idPrefix}-region`}
+                className={darkFieldClassName}
+                placeholder="AWS region"
+                value={provision.region}
+                onChange={(event) => onChange({ ...provision, region: event.target.value })}
+                maxLength={32}
+            />
+            <input
+                id={`${idPrefix}-instance-type`}
+                className={darkFieldClassName}
+                placeholder="Instance type"
+                value={provision.instanceType}
+                onChange={(event) => onChange({ ...provision, instanceType: event.target.value })}
+                maxLength={32}
+            />
+            <input
+                id={`${idPrefix}-ami`}
+                className={darkFieldClassName}
+                placeholder="AMI ID"
+                value={provision.ami}
+                onChange={(event) => onChange({ ...provision, ami: event.target.value })}
+                maxLength={32}
+            />
+            <input
+                id={`${idPrefix}-key-name`}
+                className={darkFieldClassName}
+                placeholder="EC2 key pair name"
+                value={provision.keyName}
+                onChange={(event) => onChange({ ...provision, keyName: event.target.value })}
+                maxLength={64}
+            />
+        </div>
+    );
+}
+
 function getEnvironmentUsageSummary(env: Environment): EnvironmentUsageSummary {
     const isCloudActive = Boolean(env.instance_id || env.terraform_dir || env.cloud_status === "provisioned");
     const hourlyRate = getCloudHourlyRate(env.cloud_instance_type);
@@ -140,10 +228,14 @@ export function DashboardPage() {
     const [environments, setEnvironments] = useState<Environment[]>([]);
     const [name, setName] = useState("");
     const [image, setImage] = useState("alpine:3.20");
-    const [awsRegion, setAWSRegion] = useState("us-east-1");
-    const [instanceType, setInstanceType] = useState("t3.micro");
-    const [amiID, setAMIID] = useState("ami-0c2b8ca1dad447f8a");
-    const [keyName, setKeyName] = useState("");
+    const [createTarget, setCreateTarget] = useState<CreateTarget>("local");
+    const [createCloudProvision, setCreateCloudProvision] = useState<CloudProvisionFields>(DEFAULT_CLOUD_PROVISION);
+    const [upgradeProvisionDialog, setUpgradeProvisionDialog] = useState<UpgradeProvisionDialogState>({
+        open: false,
+        environmentId: "",
+        environmentName: "",
+        provision: DEFAULT_CLOUD_PROVISION,
+    });
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
     const [isLoadingEnvironments, setIsLoadingEnvironments] = useState(true);
@@ -492,12 +584,47 @@ export function DashboardPage() {
             return;
         }
 
+        if (createTarget === "cloud") {
+            const validationError = validateCloudProvisionFields(createCloudProvision);
+            if (validationError) {
+                setError(validationError);
+                return;
+            }
+        }
+
+        const normalizedKeyName = createCloudProvision.keyName.trim().replace(/\.pem$/i, "");
+        if (createTarget === "cloud" && normalizedKeyName !== createCloudProvision.keyName.trim()) {
+            setNotice("Using EC2 key pair name without .pem extension.");
+        }
+
         setIsCreating(true);
         try {
-            const created = await createEnvironment(trimmedName, trimmedImage);
-            setEnvironments((previous) => [created, ...previous]);
+            const result = await createEnvironment({
+                name: trimmedName,
+                image: trimmedImage,
+                target: createTarget,
+                provision: createTarget === "cloud"
+                    ? {
+                        region: createCloudProvision.region.trim(),
+                        instance_type: createCloudProvision.instanceType.trim(),
+                        ami: createCloudProvision.ami.trim(),
+                        key_name: normalizedKeyName,
+                    }
+                    : undefined,
+            });
+
+            if (result.operation) {
+                await waitForOperation(
+                    result.operation,
+                    createTarget === "cloud" ? "cloud workspace ready" : "environment created",
+                );
+            } else {
+                setEnvironments((previous) => [result.environment, ...previous]);
+                setNotice("local workspace created");
+            }
+
+            await refreshEnvironments();
             setName("");
-            setNotice("environment created");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to create environment");
         } finally {
@@ -622,45 +749,53 @@ export function DashboardPage() {
         await runDeleteEnvironment(environmentId);
     }
 
-    async function handleProvisionEnvironment(id: string) {
+    function promptUpgradeToCloud(env: Environment) {
         setError("");
-        setNotice("");
+        setUpgradeProvisionDialog({
+            open: true,
+            environmentId: env.id,
+            environmentName: env.name,
+            provision: { ...DEFAULT_CLOUD_PROVISION },
+        });
+    }
 
-        if (!awsRegion.trim()) {
-            setError("aws region is required");
-            return;
-        }
-        if (!instanceType.trim()) {
-            setError("instance type is required");
-            return;
-        }
-        if (!amiID.trim()) {
-            setError("AMI ID is required");
-            return;
-        }
-        if (!keyName.trim()) {
-            setError("EC2 key pair name is required for remote SSH access");
+    function closeUpgradeProvisionDialog() {
+        setUpgradeProvisionDialog((previous) => ({ ...previous, open: false }));
+    }
+
+    async function runUpgradeToCloud() {
+        const { environmentId, provision } = upgradeProvisionDialog;
+        if (!environmentId) {
             return;
         }
 
-        const normalizedKeyName = keyName.trim().replace(/\.pem$/i, "");
-        if (normalizedKeyName !== keyName.trim()) {
+        const validationError = validateCloudProvisionFields(provision);
+        if (validationError) {
+            setError(validationError);
+            return;
+        }
+
+        const normalizedKeyName = provision.keyName.trim().replace(/\.pem$/i, "");
+        if (normalizedKeyName !== provision.keyName.trim()) {
             setNotice("Using EC2 key pair name without .pem extension.");
         }
 
-        setEnvironmentPendingAction(id, "provision");
+        closeUpgradeProvisionDialog();
+        setError("");
+        setNotice("");
+        setEnvironmentPendingAction(environmentId, "provision");
         try {
-            const operation = await provisionEnvironment(id, {
-                region: awsRegion.trim(),
-                instance_type: instanceType.trim(),
-                ami: amiID.trim(),
+            const operation = await provisionEnvironment(environmentId, {
+                region: provision.region.trim(),
+                instance_type: provision.instanceType.trim(),
+                ami: provision.ami.trim(),
                 key_name: normalizedKeyName,
             });
-            await waitForOperation(operation, "provisioning finished");
+            await waitForOperation(operation, "cloud upgrade finished");
         } catch (requestError) {
-            setError(requestError instanceof Error ? requestError.message : "failed to provision environment");
+            setError(requestError instanceof Error ? requestError.message : "failed to upgrade environment to cloud");
         } finally {
-            setEnvironmentPendingAction(id);
+            setEnvironmentPendingAction(environmentId);
         }
     }
 
@@ -728,31 +863,18 @@ export function DashboardPage() {
                             >
                                 Usage & Cost
                             </button>
-                            <button
-                                className={`w-full rounded-md px-3 py-2 text-left ${activeView === "settings" ? "bg-slate-800 text-slate-100" : "text-slate-300 hover:bg-slate-800/60"}`}
-                                type="button"
-                                onClick={() => setActiveView("settings")}
-                            >
-                                Settings
-                            </button>
                         </nav>
                     </aside>
 
                     <section className="space-y-4">
                         <header className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                             <h1 className="text-xl font-semibold">
-                                {activeView === "environments"
-                                    ? "Environments"
-                                    : activeView === "usage"
-                                        ? "Usage & Cost"
-                                        : "Settings"}
+                                {activeView === "environments" ? "Environments" : "Usage & Cost"}
                             </h1>
                             <p className="mt-1 text-sm text-slate-400">
                                 {activeView === "environments"
                                     ? "Launch and manage remote development environments."
-                                    : activeView === "usage"
-                                        ? "Review estimated EC2 runtime and cloud spend for your provisioned environments."
-                                        : "Adjust shared defaults for provisioning and environment management."}
+                                    : "Review estimated EC2 runtime and cloud spend for your provisioned environments."}
                             </p>
                             <div className="mt-3 flex items-center justify-between">
                                 <p className="text-sm text-slate-300">Signed in as {email || "loading..."}</p>
@@ -781,30 +903,70 @@ export function DashboardPage() {
                             <>
                                 <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                                     <h3 className="font-medium">Create environment</h3>
-                                    <p className="mt-1 text-sm text-slate-400">Launch a local Docker workspace for your user.</p>
+                                    <p className="mt-1 text-sm text-slate-400">
+                                        Choose a local Docker workspace or provision a cloud workspace on EC2.
+                                    </p>
 
-                                    <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+                                    <div className="mt-4 flex flex-wrap gap-2">
+                                        <button
+                                            className={`rounded-md border px-3 py-1.5 text-sm ${createTarget === "local" ? "border-cyan-600 bg-cyan-950 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"}`}
+                                            type="button"
+                                            disabled={isCreating}
+                                            onClick={() => setCreateTarget("local")}
+                                        >
+                                            Local workspace
+                                        </button>
+                                        <button
+                                            className={`rounded-md border px-3 py-1.5 text-sm ${createTarget === "cloud" ? "border-indigo-600 bg-indigo-950 text-indigo-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"}`}
+                                            type="button"
+                                            disabled={isCreating}
+                                            onClick={() => setCreateTarget("cloud")}
+                                        >
+                                            Cloud workspace (EC2)
+                                        </button>
+                                    </div>
+
+                                    <div className="mt-4 grid gap-3 md:grid-cols-2">
                                         <input
-                                            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                            className={darkFieldClassName}
                                             placeholder="Environment name (optional)"
                                             value={name}
                                             onChange={(event) => setName(event.target.value)}
                                             maxLength={64}
                                         />
                                         <input
-                                            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
+                                            className={darkFieldClassName}
                                             placeholder="Docker image"
                                             value={image}
                                             onChange={(event) => setImage(event.target.value)}
                                             maxLength={128}
                                         />
+                                    </div>
+
+                                    {createTarget === "cloud" ? (
+                                        <div className="mt-3">
+                                            <CloudProvisionFieldsForm
+                                                idPrefix="create-cloud"
+                                                provision={createCloudProvision}
+                                                onChange={setCreateCloudProvision}
+                                            />
+                                        </div>
+                                    ) : null}
+
+                                    <div className="mt-4">
                                         <button
                                             className="rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-60"
                                             type="button"
                                             disabled={isCreating}
-                                            onClick={handleCreateEnvironment}
+                                            onClick={() => void handleCreateEnvironment()}
                                         >
-                                            {isCreating ? "Working..." : "Create"}
+                                            {isCreating
+                                                ? createTarget === "cloud"
+                                                    ? "Provisioning cloud workspace..."
+                                                    : "Creating..."
+                                                : createTarget === "cloud"
+                                                    ? "Create cloud workspace"
+                                                    : "Create local workspace"}
                                         </button>
                                     </div>
                                 </article>
@@ -828,6 +990,8 @@ export function DashboardPage() {
                                                             <p className="font-medium text-slate-100">{env.name}</p>
                                                             <p className="text-xs text-slate-400">{env.image}</p>
                                                             <p className="text-xs text-slate-500">
+                                                                Type: {env.creation_mode === "cloud" ? "cloud workspace" : "local workspace"}
+                                                                {" | "}
                                                                 Runtime: {env.runtime_target || "local"}
                                                                 {" | "}
                                                                 Cloud: {env.cloud_status || "not_provisioned"}
@@ -915,7 +1079,7 @@ export function DashboardPage() {
                                                             className="rounded-md border border-indigo-700 px-3 py-1 text-xs text-indigo-300 hover:bg-indigo-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"
                                                             disabled={!capabilities.canProvision}
-                                                            onClick={() => handleProvisionEnvironment(env.id)}
+                                                            onClick={() => promptUpgradeToCloud(env)}
                                                         >
                                                             {isEnvironmentActionPending(env.id, "provision")
                                                                 ? "Provisioning..."
@@ -1078,50 +1242,48 @@ export function DashboardPage() {
                             </>
                         ) : null}
 
-                        {activeView === "settings" ? (
-                            <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                                <h3 className="font-medium">Cloud provisioning defaults</h3>
-                                <p className="mt-1 text-sm text-slate-400">
-                                    Used when you click Provision on an environment. The key pair name is the name registered in AWS EC2
-                                    (for example, <code className="text-slate-300">docklab-key</code>), not your local{" "}
-                                    <code className="text-slate-300">.pem</code> file path.
-                                </p>
-
-                                <div className="mt-4 grid gap-3 md:grid-cols-2">
-                                    <input
-                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                        placeholder="AWS region"
-                                        value={awsRegion}
-                                        onChange={(event) => setAWSRegion(event.target.value)}
-                                        maxLength={32}
-                                    />
-                                    <input
-                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                        placeholder="Instance type"
-                                        value={instanceType}
-                                        onChange={(event) => setInstanceType(event.target.value)}
-                                        maxLength={32}
-                                    />
-                                    <input
-                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                        placeholder="AMI ID"
-                                        value={amiID}
-                                        onChange={(event) => setAMIID(event.target.value)}
-                                        maxLength={32}
-                                    />
-                                    <input
-                                        className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-cyan-500 focus:ring"
-                                        placeholder="EC2 key pair name (e.g. docklab-key)"
-                                        value={keyName}
-                                        onChange={(event) => setKeyName(event.target.value)}
-                                        maxLength={64}
-                                    />
-                                </div>
-                            </article>
-                        ) : null}
                     </section>
                 </div>
             </main>
+
+            {upgradeProvisionDialog.open ? (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 px-4">
+                    <div className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+                        <h3 className="text-lg font-semibold text-slate-100">Upgrade to cloud</h3>
+                        <p className="mt-2 text-sm text-slate-300">
+                            Provision EC2 for <span className="font-medium text-slate-100">{upgradeProvisionDialog.environmentName}</span>.
+                            The key pair name is registered in AWS EC2 (for example,{" "}
+                            <code className="text-slate-300">docklab-key</code>), not your local{" "}
+                            <code className="text-slate-300">.pem</code> file path.
+                        </p>
+                        <div className="mt-4">
+                            <CloudProvisionFieldsForm
+                                idPrefix="upgrade-cloud"
+                                provision={upgradeProvisionDialog.provision}
+                                onChange={(provision) =>
+                                    setUpgradeProvisionDialog((previous) => ({ ...previous, provision }))
+                                }
+                            />
+                        </div>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button
+                                className="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
+                                type="button"
+                                onClick={closeUpgradeProvisionDialog}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-indigo-50 hover:bg-indigo-500"
+                                type="button"
+                                onClick={() => void runUpgradeToCloud()}
+                            >
+                                Upgrade to cloud
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
 
             {confirmDialog.open ? (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 px-4">

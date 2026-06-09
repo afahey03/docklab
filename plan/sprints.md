@@ -147,6 +147,14 @@ Make provisioned EC2 instances usable as actual remote development workspaces.
 - After provisioning EC2, a user can open a browser terminal connected to the remote workspace container.
 - Local-only flow continues to work when cloud is not provisioned.
 
+### Post-Sprint 7 enhancement ✅ Create-time local vs cloud
+- `POST /api/v1/environments` accepts `target` (`local` | `cloud`) and optional `provision` payload
+- Cloud create skips local Docker; provisions EC2 asynchronously (`202` + operation)
+- `creation_mode` column distinguishes cloud-created vs local-created environments
+- Local workspaces can still be upgraded via **Upgrade to cloud**; cloud-created envs cannot re-provision
+- Dashboard create form: **Local workspace** / **Cloud workspace (EC2)** toggle with inline cloud settings
+- **Upgrade to cloud** modal for local workspaces (replaces Settings tab)
+
 ---
 
 ## Sprint 8 🔲 Cloud Lifecycle Automation

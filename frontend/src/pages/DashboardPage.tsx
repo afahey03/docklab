@@ -856,7 +856,16 @@ export function DashboardPage() {
     }
 
     function workspaceStatusBadgeClass(status: string): string {
-        return status === "running" ? "border-cyan-700 text-cyan-300" : "border-slate-700 text-slate-300";
+        switch (status) {
+            case "running":
+                return "border-cyan-700 text-cyan-300";
+            case "bootstrapping":
+            case "provisioning":
+            case "deprovisioning":
+                return "border-amber-700 text-amber-300";
+            default:
+                return "border-slate-700 text-slate-300";
+        }
     }
 
     async function handleCheckRemoteHealth(id: string) {
@@ -1039,7 +1048,7 @@ export function DashboardPage() {
                                                                 {" | "}
                                                                 Runtime: {env.runtime_target || "local"}
                                                                 {" | "}
-                                                                Cloud: {env.cloud_status || "not_provisioned"}
+                                                                Cloud: {capabilities.cloudStatusLabel}
                                                                 {env.public_ip ? ` | IP: ${env.public_ip}` : ""}
                                                             </p>
                                                             {env.cloud_instance_type ? (
@@ -1053,8 +1062,8 @@ export function DashboardPage() {
                                                                     className={`text-xs ${
                                                                         env.cloud_status === "provision_failed"
                                                                             ? "text-rose-400"
-                                                                            : env.cloud_status === "provisioning" ||
-                                                                                env.cloud_status === "deprovisioning"
+                                                                            : env.cloud_status === "deprovisioning" ||
+                                                                                capabilities.showRemoteBootstrapHint
                                                                               ? "text-amber-300"
                                                                               : env.cloud_status === "cloud_stopped"
                                                                                 ? "text-sky-300"

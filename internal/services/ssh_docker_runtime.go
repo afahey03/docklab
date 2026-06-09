@@ -52,6 +52,14 @@ func workspaceContainerRef(env *models.Environment) string {
 }
 
 func isWorkspaceStopIgnorable(err error) bool {
+	return isWorkspaceRemoteCleanupIgnorable(err)
+}
+
+func isWorkspaceDeleteIgnorable(err error) bool {
+	return isWorkspaceRemoteCleanupIgnorable(err)
+}
+
+func isWorkspaceRemoteCleanupIgnorable(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -59,7 +67,11 @@ func isWorkspaceStopIgnorable(err error) bool {
 	return strings.Contains(message, "no such container") ||
 		strings.Contains(message, "page not found") ||
 		strings.Contains(message, "is not running") ||
-		strings.Contains(message, "already stopped")
+		strings.Contains(message, "already stopped") ||
+		strings.Contains(message, "i/o timeout") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "failed to connect to remote host over ssh") ||
+		strings.Contains(message, "wait for ssh")
 }
 
 func (r *SSHDockerRuntime) CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error) {

@@ -327,6 +327,7 @@ func (r *PostgresEnvironmentRepository) ListIdleProvisionedCloudSince(ctx contex
 		SELECT ` + envColumns + `
 		FROM environments
 		WHERE cloud_status = 'provisioned'
+		  AND runtime_target = 'remote'
 		  AND instance_id <> ''
 		  AND last_activity_at < $1`
 

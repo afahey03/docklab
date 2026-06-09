@@ -273,6 +273,14 @@ func (s *CloudLifecycleService) stopWorkspaceContainer(ctx context.Context, env 
 }
 
 func (s *CloudLifecycleService) terminateCloudResources(ctx context.Context, env *models.Environment) error {
+	if env.RuntimeTarget == runtimeTargetRemote && env.ContainerID != "" && !isPlaceholderContainerID(env.ContainerID) {
+		if remoteRuntime, remoteErr := s.resolver.ForEnvironment(env); remoteErr == nil {
+			deleteCtx, deleteCancel := context.WithTimeout(ctx, 30*time.Second)
+			_ = remoteRuntime.DeleteWorkspace(deleteCtx, workspaceContainerRef(env))
+			deleteCancel()
+		}
+	}
+
 	_, _ = s.environmentRepo.UpdateProvisioning(
 		ctx,
 		env.ID,
@@ -307,12 +315,6 @@ func (s *CloudLifecycleService) terminateCloudResources(ctx context.Context, env
 			env.CloudProvisionedAt,
 		)
 		return err
-	}
-
-	if env.RuntimeTarget == runtimeTargetRemote && env.ContainerID != "" && !isPlaceholderContainerID(env.ContainerID) {
-		if remoteRuntime, remoteErr := s.resolver.ForEnvironment(env); remoteErr == nil {
-			_ = remoteRuntime.DeleteWorkspace(ctx, workspaceContainerRef(env))
-		}
 	}
 
 	if env.CreationMode == creationModeCloud {

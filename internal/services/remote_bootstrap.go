@@ -137,7 +137,9 @@ func (s *RemoteBootstrapService) RevertToLocal(ctx context.Context, env *models.
 
 	if env.RuntimeTarget == runtimeTargetRemote && env.PublicIP != "" && env.ContainerID != "" {
 		if remoteRuntime, remoteErr := s.resolver.ForEnvironment(env); remoteErr == nil {
-			_ = remoteRuntime.DeleteWorkspace(ctx, workspaceContainerRef(env))
+			if deleteErr := remoteRuntime.DeleteWorkspace(ctx, workspaceContainerRef(env)); deleteErr != nil && !isWorkspaceDeleteIgnorable(deleteErr) {
+				return "", deleteErr
+			}
 		}
 	}
 

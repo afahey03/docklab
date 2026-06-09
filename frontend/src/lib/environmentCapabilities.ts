@@ -19,10 +19,50 @@ export type EnvironmentCapabilities = {
     cloudStatusLabel: string;
 };
 
-const transitionalCloudStatuses = new Set(["provisioning", "deprovisioning"]);
+const deprovisioningCloudStatus = "deprovisioning";
+
+export function isCloudBootstrapping(env: Environment): boolean {
+    const cloudStatus = env.cloud_status || "not_provisioned";
+    return (
+        hasCloudInstance(env) &&
+        !isRemoteRuntime(env) &&
+        cloudStatus !== deprovisioningCloudStatus &&
+        cloudStatus !== "provision_failed" &&
+        cloudStatus !== "not_provisioned"
+    );
+}
+
+export function isCloudTransitioning(env: Environment): boolean {
+    const cloudStatus = env.cloud_status || "not_provisioned";
+    return cloudStatus === deprovisioningCloudStatus || (cloudStatus === "provisioning" && !hasCloudInstance(env));
+}
 
 export function hasTransitioningCloudEnvironments(environments: Environment[]): boolean {
-    return environments.some((env) => transitionalCloudStatuses.has(env.cloud_status || "not_provisioned"));
+    return environments.some((env) => isCloudTransitioning(env) || isCloudBootstrapping(env));
+}
+
+export function getCloudStatusLabel(env: Environment): string {
+    const cloudStatus = env.cloud_status || "not_provisioned";
+    if (hasCloudInstance(env) && cloudStatus === "provisioning") {
+        return "provisioned";
+    }
+    if (isCloudCreation(env) || hasCloudInstance(env)) {
+        return cloudStatus;
+    }
+    return "not_provisioned";
+}
+
+export function getWorkspaceStatusLabel(env: Environment): string {
+    if (env.cloud_status === deprovisioningCloudStatus) {
+        return "deprovisioning";
+    }
+    if (isCloudBootstrapping(env)) {
+        return "bootstrapping";
+    }
+    if (isPlaceholderContainer(env)) {
+        return "provisioning";
+    }
+    return env.status;
 }
 
 export function hasCloudInstance(env: Environment): boolean {
@@ -62,13 +102,14 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
     const cloudStatus = env.cloud_status || "not_provisioned";
     const hasInstance = hasCloudInstance(env);
     const isRemote = isRemoteRuntime(env);
-    const isTransitioning = transitionalCloudStatuses.has(cloudStatus);
+    const isBootstrapping = isCloudBootstrapping(env);
+    const isTransitioning = isCloudTransitioning(env);
     const isRunning = env.status === "running";
-    const isProvisioned = cloudStatus === "provisioned";
+    const isProvisioned = cloudStatus === "provisioned" || cloudStatus === "cloud_stopped";
     const isCloudStopped = cloudStatus === "cloud_stopped";
     const isProvisionFailed = cloudStatus === "provision_failed";
     const workspacePending = isPlaceholderContainer(env);
-    const canRepairRemoteWorkspace = !isPending && needsRemoteRepair(env) && !isTransitioning;
+    const canRepairRemoteWorkspace = !isPending && needsRemoteRepair(env) && cloudStatus !== deprovisioningCloudStatus;
 
     const canProvision =
         !isPending &&
@@ -86,6 +127,7 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
         isRunning &&
         !workspacePending &&
         !isTransitioning &&
+        !isBootstrapping &&
         (env.runtime_target === "local" || (isRemote && isProvisioned && !env.cloud_error));
 
     let provisionLabel = "Upgrade to cloud";
@@ -93,6 +135,8 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
         provisionLabel = "Provisioning...";
     } else if (isProvisioned || (isRemote && hasInstance)) {
         provisionLabel = "Cloud attached";
+    } else if (isBootstrapping) {
+        provisionLabel = "Attaching workspace";
     } else if (isTransitioning) {
         provisionLabel = "Cloud busy";
     } else if (!canProvision && hasInstance) {
@@ -106,19 +150,21 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
     return {
         canStart: !isPending && env.status === "stopped" && !isTransitioning && !workspacePending,
         canStop: !isPending && env.status === "running" && !workspacePending,
-        canDelete: !isPending && !isTransitioning,
+        canDelete: !isPending && (cloudStatus === deprovisioningCloudStatus || !isTransitioning),
         canOpenTerminal,
         canProvision,
         canRepairRemoteWorkspace,
         canTerminateEC2,
         canCheckRemoteHealth: !isPending && hasInstance,
-        showCloudWarning: isProvisionFailed || (Boolean(env.cloud_error) && !isCloudStopped && cloudStatus !== "provisioning"),
+        showCloudWarning:
+            isProvisionFailed ||
+            (Boolean(env.cloud_error) && !isCloudStopped && !isBootstrapping && cloudStatus !== deprovisioningCloudStatus),
         showCloudIdleBillingWarning: isProvisioned && hasInstance && env.status === "stopped",
         showCloudStoppedIndicator: isCloudStopped && hasInstance,
-        showRemoteBootstrapHint: needsRemoteBootstrap(env),
+        showRemoteBootstrapHint: isBootstrapping,
         provisionLabel,
         repairRemoteLabel,
-        workspaceStatusLabel: isTransitioning ? cloudStatus : env.status,
-        cloudStatusLabel: isCloudCreation(env) || hasInstance ? cloudStatus : "not_provisioned",
+        workspaceStatusLabel: getWorkspaceStatusLabel(env),
+        cloudStatusLabel: getCloudStatusLabel(env),
     };
 }

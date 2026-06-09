@@ -584,12 +584,16 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 		return err
 	}
 
+	_ = s.deleteWorkspaceBestEffort(ctx, env)
+
 	if err := s.destroyCloudResources(ctx, env, userEmail); err != nil {
 		return err
 	}
 
-	if err := s.deleteWorkspace(ctx, env); err != nil {
-		return err
+	if env.RuntimeTarget != runtimeTargetRemote {
+		if err := s.deleteWorkspace(ctx, env); err != nil {
+			return err
+		}
 	}
 
 	return s.repo.Delete(ctx, id, userEmail)
@@ -606,20 +610,39 @@ func (s *EnvironmentService) deleteWorkspace(ctx context.Context, env *models.En
 	return runtime.DeleteWorkspace(ctx, workspaceContainerRef(env))
 }
 
+func (s *EnvironmentService) deleteWorkspaceBestEffort(ctx context.Context, env *models.Environment) error {
+	if env == nil || isPlaceholderContainerID(env.ContainerID) {
+		return nil
+	}
+	if env.RuntimeTarget != runtimeTargetRemote && env.InstanceID == "" {
+		return nil
+	}
+
+	runtime, err := s.runtimeFor(env)
+	if err != nil {
+		return nil
+	}
+
+	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	err = runtime.DeleteWorkspace(deleteCtx, workspaceContainerRef(env))
+	if err != nil && isWorkspaceDeleteIgnorable(err) {
+		return nil
+	}
+	return err
+}
+
 func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, userEmail string) (*models.Environment, error) {
 	env, err := s.repo.GetByIDForUser(ctx, id, userEmail)
 	if err != nil {
 		return nil, err
 	}
 
+	_ = s.deleteWorkspaceBestEffort(ctx, env)
+
 	if err := s.destroyCloudResources(ctx, env, userEmail); err != nil {
 		return nil, err
-	}
-
-	if env.RuntimeTarget == runtimeTargetRemote && env.ContainerID != "" && !isPlaceholderContainerID(env.ContainerID) {
-		if remoteRuntime, remoteErr := s.resolver.ForEnvironment(env); remoteErr == nil {
-			_ = remoteRuntime.DeleteWorkspace(ctx, workspaceContainerRef(env))
-		}
 	}
 
 	if env.CreationMode == creationModeCloud {
@@ -715,11 +738,16 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 		return nil, err
 	}
 
+	cloudProvisionedAt := env.CloudProvisionedAt
+	if cloudProvisionedAt == nil {
+		now := time.Now().UTC()
+		cloudProvisionedAt = &now
+	}
 	_, err = s.repo.UpdateProvisioning(
 		ctx,
 		env.ID,
 		userEmail,
-		cloudProvisioning,
+		cloudProvisioned,
 		req.Region,
 		req.InstanceType,
 		req.KeyName,
@@ -727,7 +755,7 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 		result.PublicIP,
 		result.TerraformDir,
 		"bootstrapping remote workspace",
-		env.CloudProvisionedAt,
+		cloudProvisionedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -781,11 +809,15 @@ func (s *EnvironmentService) reportBootstrapProgress(ctx context.Context, env *m
 	if env == nil {
 		return
 	}
+	cloudStatus := cloudProvisioned
+	if env.InstanceID == "" {
+		cloudStatus = cloudProvisioning
+	}
 	_, _ = s.repo.UpdateProvisioning(
 		ctx,
 		env.ID,
 		env.UserEmail,
-		cloudProvisioning,
+		cloudStatus,
 		env.CloudRegion,
 		env.CloudInstanceType,
 		env.CloudKeyName,

@@ -346,12 +346,12 @@ func writeTerraformWorkspace(dir string, backendConfig terraformBackendConfig, e
 
 	req = normalizeProvisionRequest(req)
 	vars := map[string]string{
-		"aws_region":       req.Region,
-		"instance_type":    req.InstanceType,
-		"ami_id":           req.AMI,
-		"key_name":         req.KeyName,
-		"environment_id":   environmentID,
-		"workspace_image":  req.WorkspaceImage,
+		"aws_region":      req.Region,
+		"instance_type":   req.InstanceType,
+		"ami_id":          req.AMI,
+		"key_name":        req.KeyName,
+		"environment_id":  environmentID,
+		"workspace_image": req.WorkspaceImage,
 	}
 	varBytes, err := json.Marshal(vars)
 	if err != nil {

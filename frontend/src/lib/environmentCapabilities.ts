@@ -75,7 +75,8 @@ export function getEnvironmentCapabilities(env: Environment, isPending: boolean)
         !workspacePending &&
         (cloudStatus === "not_provisioned" || cloudStatus === "provision_failed");
 
-    const canTerminateEC2 = !isPending && hasInstance && !isTransitioning;
+    const canTerminateEC2 =
+        !isPending && hasInstance && !isTransitioning && !isCloudCreation(env);
 
     const canOpenTerminal =
         !isPending &&

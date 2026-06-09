@@ -61,7 +61,7 @@ plan/                      # Project plan and sprint tracking
 - Remote health: `GET /api/v1/environments/:id/remote-health` (SSH, Docker daemon, and workspace container readiness)
 - Retry remote bootstrap: `POST /api/v1/environments/:id/retry-bootstrap` (adopts existing remote container when present)
 - Terraform provisioning: `POST /api/v1/environments/:id/provision` — upgrade a **local** workspace to EC2 (blocked for cloud-created environments and when EC2 already exists)
-- Cloud-only termination: `POST /api/v1/environments/:id/destroy-cloud` (cloud-created envs stay cloud-only; local-upgraded envs revert to local Docker)
+- Detach cloud resources: `POST /api/v1/environments/:id/destroy-cloud` (local-upgraded envs only; reverts to local Docker; blocked for cloud-created workspaces)
 - Async operation status: `GET /api/v1/operations/:id`
 - Postgres-persisted operation tracking (survives backend restarts)
 - Typed provisioning validation errors (`code` + `error`)
@@ -213,8 +213,8 @@ Used variables:
 8. Cloud workspaces provision EC2 asynchronously at create time; poll until the operation succeeds.
 9. After cloud provisioning succeeds, the environment uses `runtime_target = remote` and the terminal connects over SSH.
 10. Use **Check remote health** to verify SSH, Docker, and workspace container readiness.
-11. Use **Terminate EC2** to destroy cloud resources (local-upgraded envs revert to local Docker; cloud-created envs stay cloud-only).
-12. Use **Delete** to remove both the environment and any provisioned cloud resources.
+11. Use **Terminate EC2** on local-upgraded workspaces to destroy EC2 and revert to local Docker.
+12. Use **Delete** to remove an environment; for cloud workspaces this also terminates EC2.
 13. Long-running cloud actions run asynchronously; the dashboard polls operation status until completion.
 14. Operation status is persisted in PostgreSQL, so polling survives backend restarts.
 15. Running environments with no terminal activity for longer than `IDLE_STOP_AFTER_MINUTES` are automatically stopped (local or remote container).
@@ -266,7 +266,7 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 9. Open the terminal and run commands on the remote workspace container.
 10. Create a local workspace and use **Upgrade to cloud** via the provision modal; confirm it switches to remote runtime.
 11. Verify **Usage & Cost** shows provisioned environments and non-zero rate estimates.
-12. Use **Terminate EC2** on a cloud-created env (stays cloud-only) and on an upgraded local env (reverts to local Docker).
+12. Use **Terminate EC2** on an upgraded local env to revert to local Docker; cloud workspaces use **Delete** only.
 13. Use **Delete** and confirm both the environment row and EC2 resources are removed.
 
 ## Roadmap

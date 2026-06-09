@@ -151,7 +151,7 @@ Make provisioned EC2 instances usable as actual remote development workspaces.
 - `POST /api/v1/environments` accepts `target` (`local` | `cloud`) and optional `provision` payload
 - Cloud create skips local Docker; provisions EC2 asynchronously (`202` + operation)
 - `creation_mode` column distinguishes cloud-created vs local-created environments
-- Local workspaces can still be upgraded via **Upgrade to cloud**; cloud-created envs cannot re-provision
+- Local workspaces can still be upgraded via **Upgrade to cloud**; cloud-created envs cannot re-provision or use **Terminate EC2** (delete only)
 - Dashboard create form: **Local workspace** / **Cloud workspace (EC2)** toggle with inline cloud settings
 - **Upgrade to cloud** modal for local workspaces (replaces Settings tab)
 

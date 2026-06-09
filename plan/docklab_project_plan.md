@@ -250,7 +250,7 @@ Run Docker workspaces on provisioned EC2 machines and attach the browser termina
 - Post-provision bootstrap with SSH/Docker wait (2s poll), EC2 user-data image pre-pull, phased progress in dashboard, remote container creation, runtime migration
 - Remote terminal via SSH PTY + `docker exec`
 - `GET /api/v1/environments/:id/remote-health`
-- `runtime_target` and `cloud_key_name` on environments; destroy-cloud reverts to local
+- `runtime_target` and `cloud_key_name` on environments; destroy-cloud reverts local-upgraded envs to local Docker (cloud-created workspaces use delete only)
 
 ## Success criteria — Met
 - Remote workspaces are operational; terminal sessions run on EC2 when provisioned

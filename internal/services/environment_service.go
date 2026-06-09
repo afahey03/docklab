@@ -354,6 +354,12 @@ func (s *EnvironmentService) QueueDestroyCloudEnvironment(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
+	if env.CreationMode == creationModeCloud {
+		return nil, &ProvisionValidationError{
+			Code:    "terminate_not_allowed",
+			Message: "cloud workspaces cannot be terminated separately; delete the environment instead",
+		}
+	}
 	s.clearBlockingOperations(ctx, env)
 	hasInProgress, err := s.hasInProgressOperation(ctx, env.ID, userEmail)
 	if err != nil {

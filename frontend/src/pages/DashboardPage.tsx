@@ -23,6 +23,7 @@ import { clearToken, getToken } from "../lib/auth";
 import {
     getEnvironmentCapabilities,
     hasTransitioningCloudEnvironments,
+    isCloudCreation,
 } from "../lib/environmentCapabilities";
 
 type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud" | "retry_bootstrap";
@@ -674,13 +675,24 @@ export function DashboardPage() {
         }
 
         const hasCloudResources = Boolean(env.instance_id || env.terraform_dir || env.cloud_status === "provisioned");
+        const isCloudWorkspace = isCloudCreation(env);
+
+        let title = "Delete Environment";
+        let description = "This will remove the environment from DockLab.";
+        if (isCloudWorkspace && hasCloudResources) {
+            title = "Delete Cloud Workspace";
+            description = "This will terminate the EC2 instance and remove this workspace from DockLab.";
+        } else if (hasCloudResources) {
+            title = "Delete Environment And Cloud Resources";
+            description =
+                "This will terminate provisioned EC2 infrastructure and remove the environment from DockLab.";
+        }
+
         setConfirmDialog({
             open: true,
             environmentId: id,
-            title: hasCloudResources ? "Delete Environment And Cloud Resources" : "Delete Environment",
-            description: hasCloudResources
-                ? "This will terminate provisioned EC2 infrastructure and remove the environment from DockLab."
-                : "This will remove the environment from DockLab.",
+            title,
+            description,
             confirmLabel: "Delete",
             action: "delete_environment",
             destructive: true,
@@ -1075,14 +1087,18 @@ export function DashboardPage() {
                                                         >
                                                             {isEnvironmentActionPending(env.id, "delete") ? "Deleting..." : "Delete"}
                                                         </button>
-                                                        <button
-                                                            className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                                                            type="button"
-                                                            disabled={!capabilities.canTerminateEC2}
-                                                            onClick={() => promptDestroyCloudEnvironment(env.id)}
-                                                        >
-                                                            {isEnvironmentActionPending(env.id, "destroy_cloud") ? "Terminating..." : "Terminate EC2"}
-                                                        </button>
+                                                        {capabilities.canTerminateEC2 ? (
+                                                            <button
+                                                                className="rounded-md border border-fuchsia-700 px-3 py-1 text-xs text-fuchsia-300 hover:bg-fuchsia-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                                                type="button"
+                                                                disabled={isEnvironmentPending(env.id)}
+                                                                onClick={() => promptDestroyCloudEnvironment(env.id)}
+                                                            >
+                                                                {isEnvironmentActionPending(env.id, "destroy_cloud")
+                                                                    ? "Terminating..."
+                                                                    : "Terminate EC2"}
+                                                            </button>
+                                                        ) : null}
                                                         <button
                                                             className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                                                             type="button"

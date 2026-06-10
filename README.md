@@ -8,11 +8,12 @@ Cloud-based remote development environment platform. Users authenticate, manage 
 
 ## Current status
 
-On top of the Sprint 1–8 MVP (auth, local/remote Docker workspaces, browser terminals, Terraform EC2 provisioning with bootstrap, idle lifecycle automation, reconciliation), the platform now ships:
+DockLab is a full-featured remote development platform:
 
+- **Core platform:** auth, local and remote Docker workspaces, browser terminals, Terraform EC2 provisioning with bootstrap, idle lifecycle automation, and cloud drift reconciliation
 - **Production hardening:** JWT refresh tokens with rotation, GitHub OAuth login, per-IP rate limiting, per-user resource quotas, Prometheus `/metrics`, webhook alerting, AWS Secrets Manager bootstrap (production runs with no `.env` file: IAM-role credentials and a base64 SSH key from the secret), CD workflow (GHCR images + SSH deploy) with `docker-compose.prod.yml`
-- **Durable cost tracking:** persisted `environment_usage` sessions, AWS Pricing API rates (with static fallback), billing summary with per-environment rollups, monthly budgets with alerts
-- **Advanced features:** browser IDE (code-server sidecar), workspace snapshots (`docker commit` + restore), environment sharing with collaborative shared terminals, a template marketplace, Git repo auto-clone at create time, and an optional Kubernetes runtime backend (`DOKLAB_RUNTIME=kubernetes`)
+- **Cost tracking:** persisted `environment_usage` sessions, AWS Pricing API rates (with static fallback), billing summary with per-environment rollups, monthly budgets with alerts
+- **Developer experience:** browser IDE (code-server sidecar), workspace snapshots (`docker commit` + restore), environment sharing with collaborative shared terminals, a template marketplace, Git repo auto-clone at create time, and an optional Kubernetes runtime backend (`DOKLAB_RUNTIME=kubernetes`)
 
 **Core remote-dev flow works when AWS and SSH are configured.** At create time, choose a **local Docker workspace** or a **cloud workspace (EC2)**. Cloud environments provision EC2 and bootstrap the remote container in one async flow — no throwaway local container first. Local environments can optionally be upgraded to EC2 later. See [Known limitations](#known-limitations) for remaining gaps.
 
@@ -49,7 +50,6 @@ internal/
   database/                # PostgreSQL pool and schema bootstrap
 pkg/logger/                # Shared structured logger (log/slog)
 frontend/                  # React + TypeScript + Tailwind dashboard (+ production Dockerfile/nginx)
-plan/                      # Project plan and sprint tracking
 .github/workflows/         # CI (tests, lint, Docker build) + CD (GHCR push, SSH deploy)
 docker-compose.yml         # Local dev stack
 docker-compose.prod.yml    # Production stack using GHCR images
@@ -347,7 +347,7 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 
 ## End-to-end test checklist
 
-### Core flow (Sprints 1–8)
+### Core workspace & cloud flow
 
 1. Start PostgreSQL and the backend with `docker compose up --build`.
 2. Start the frontend with `cd frontend && npm run dev`.
@@ -364,7 +364,7 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 13. Leave a provisioned environment idle past the workspace threshold, confirm the workspace stops, then EC2 moves to `cloud_stopped`.
 14. Call `GET /api/v1/lifecycle-policy` and confirm the dashboard idle policy summary matches your env configuration.
 
-### Auth & hardening (Sprint 9)
+### Auth & hardening
 
 15. Log in and confirm the response stores both tokens; wait past `JWT_TTL_MINUTES` (or set it to `1`) and confirm an API call transparently refreshes instead of logging you out.
 16. **Sign out**, then try `POST /api/v1/auth/refresh` with the old refresh token — it must be rejected.
@@ -374,7 +374,7 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 20. Open `http://localhost:8080/metrics` and confirm Prometheus metrics (HTTP requests, operations, terminal clients) are exposed.
 21. Point `DOKLAB_ALERT_WEBHOOK_URL` at a request bin and confirm a failed provision posts an alert.
 
-### Templates, repos, snapshots, sharing, IDE (Sprint 10+)
+### Templates, snapshots, sharing & IDE
 
 22. Create an environment from a **template** and confirm the image matches the template.
 23. Create an environment with a Git `repo_url` and confirm the repo is cloned under `/workspace` in the terminal.
@@ -383,7 +383,7 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 26. **Start IDE**, open the URL, enter the password, and edit a file under `/workspace`; confirm the change is visible from the terminal.
 27. On a provisioned cloud workspace, start the IDE and confirm it is reachable at `http://<public-ip>:8443`.
 
-### Usage & billing (Sprint 10)
+### Usage & billing
 
 28. Provision a cloud workspace and confirm **Usage & Cost** shows an open usage session with a non-zero hourly rate.
 29. Stop/terminate the instance and confirm the session closes with runtime minutes and estimated cost.
@@ -393,8 +393,6 @@ Then set the `DOKLAB_TERRAFORM_STATE_*` variables in your `.env`.
 
 31. With a local cluster (kind/minikube) and `DOKLAB_RUNTIME=kubernetes`, create a local environment and confirm a Deployment appears in `DOKLAB_K8S_NAMESPACE`; stop/start scales it 0/1; the terminal uses `kubectl exec`.
 
-## Roadmap
+## Future improvements
 
-See [plan/sprints.md](plan/sprints.md) for sprint-level tracking and [plan/docklab_project_plan.md](plan/docklab_project_plan.md) for the full phase plan.
-
-All planned sprints (1–10) and the former stretch goals (browser IDE, Kubernetes runtime, snapshots, collaboration, GitHub integration, template marketplace) are delivered. Remaining polish items are tracked in [Known limitations](#known-limitations).
+Known gaps and polish items are tracked in [Known limitations](#known-limitations). Priority areas include per-user idle policies, production IDE TLS, distributed rate limiting for multi-replica deployments, and PVC-backed persistence for the Kubernetes runtime.

@@ -10,7 +10,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
@@ -122,12 +121,6 @@ func (c *AWSEC2InstanceClient) DescribeInstance(ctx context.Context, region, ins
 }
 
 func loadEC2Client(ctx context.Context, region string) (*ec2.Client, error) {
-	accessKey := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
-	secretKey := strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY"))
-	if accessKey == "" || secretKey == "" {
-		return nil, ErrEC2CredentialsMissing
-	}
-
 	if strings.TrimSpace(region) == "" {
 		region = strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION"))
 	}
@@ -135,14 +128,14 @@ func loadEC2Client(ctx context.Context, region string) (*ec2.Client, error) {
 		region = "us-east-1"
 	}
 
-	sessionToken := strings.TrimSpace(os.Getenv("AWS_SESSION_TOKEN"))
-	cfg, err := config.LoadDefaultConfig(
-		ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken)),
-	)
+	// Default credential chain: static env keys win when present, otherwise shared
+	// config files, IAM instance roles (IMDS), or ECS task roles.
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+	if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
+		return nil, ErrEC2CredentialsMissing
 	}
 
 	return ec2.NewFromConfig(cfg), nil

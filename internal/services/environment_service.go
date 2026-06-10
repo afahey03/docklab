@@ -48,12 +48,16 @@ var ErrProvisionInProgress = errors.New("provisioning is already in progress for
 var ErrOperationNotFound = errors.New("operation not found")
 var ErrOperationInProgress = errors.New("another long-running operation is already in progress for this environment")
 var ErrCloudAlreadyProvisioned = errors.New("environment already has cloud resources; terminate EC2 before reprovisioning")
+var ErrEnvironmentQuotaExceeded = errors.New("environment quota reached; delete an environment before creating another")
+var ErrOperationQuotaExceeded = errors.New("too many concurrent operations in progress; wait for one to finish")
 
 type CreateEnvironmentInput struct {
-	Name      string
-	Image     string
-	Target    string
-	Provision ProvisionRequest
+	Name       string
+	Image      string
+	Target     string
+	RepoURL    string
+	TemplateID string
+	Provision  ProvisionRequest
 }
 
 type CreateEnvironmentResult struct {
@@ -88,6 +92,16 @@ type ContainerRuntime interface {
 	StartWorkspace(ctx context.Context, containerID string) error
 	StopWorkspace(ctx context.Context, containerID string) error
 	DeleteWorkspace(ctx context.Context, containerID string) error
+	// CommitWorkspace captures the workspace filesystem as an image (snapshots).
+	CommitWorkspace(ctx context.Context, containerRef, imageTag string) error
+	// DeleteWorkspaceVolume removes the named workspace volume created for a workspace.
+	DeleteWorkspaceVolume(ctx context.Context, workspaceName string) error
+}
+
+// WorkspaceVolumeName is the named volume mounted at /workspace inside every Docker
+// workspace container. Snapshots archive its contents into the committed image.
+func WorkspaceVolumeName(workspaceName string) string {
+	return "docklab-ws-" + workspaceName
 }
 
 type DockerCLIRuntime struct{}
@@ -121,13 +135,23 @@ func (d *DockerCLIRuntime) runDocker(ctx context.Context, args ...string) (strin
 }
 
 func (d *DockerCLIRuntime) CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error) {
-	args := []string{"run", "-d", "--name", name}
+	args := []string{"run", "-d", "--name", name, "-v", WorkspaceVolumeName(name) + ":/workspace", "-w", "/workspace"}
 	for key, value := range labels {
 		args = append(args, "--label", fmt.Sprintf("%s=%s", key, value))
 	}
 	args = append(args, image, "sleep", "infinity")
 
 	return d.runDocker(ctx, args...)
+}
+
+func (d *DockerCLIRuntime) CommitWorkspace(ctx context.Context, containerRef, imageTag string) error {
+	_, err := d.runDocker(ctx, "commit", containerRef, imageTag)
+	return err
+}
+
+func (d *DockerCLIRuntime) DeleteWorkspaceVolume(ctx context.Context, workspaceName string) error {
+	_, err := d.runDocker(ctx, "volume", "rm", "-f", WorkspaceVolumeName(workspaceName))
+	return err
 }
 
 func (d *DockerCLIRuntime) StartWorkspace(ctx context.Context, containerID string) error {
@@ -152,6 +176,12 @@ type EnvironmentService struct {
 	bootstrap       *RemoteBootstrapService
 	terraformRunner TerraformRunner
 	cloudLifecycle  *CloudLifecycleService
+	usage           *UsageService
+	metrics         *Metrics
+	alerts          *AlertService
+
+	maxEnvironmentsPerUser  int
+	maxConcurrentOpsPerUser int
 }
 
 func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRepo repositories.OperationRepository, resolver *RuntimeResolver) *EnvironmentService {
@@ -166,6 +196,21 @@ func NewEnvironmentService(repo repositories.EnvironmentRepository, operationRep
 
 func (s *EnvironmentService) SetCloudLifecycle(cloudLifecycle *CloudLifecycleService) {
 	s.cloudLifecycle = cloudLifecycle
+}
+
+// SetQuotas configures per-user limits; zero or negative values disable a limit.
+func (s *EnvironmentService) SetQuotas(maxEnvironments, maxConcurrentOps int) {
+	s.maxEnvironmentsPerUser = maxEnvironments
+	s.maxConcurrentOpsPerUser = maxConcurrentOps
+}
+
+func (s *EnvironmentService) SetUsageService(usage *UsageService) {
+	s.usage = usage
+}
+
+func (s *EnvironmentService) SetObservability(metrics *Metrics, alerts *AlertService) {
+	s.metrics = metrics
+	s.alerts = alerts
 }
 
 func (s *EnvironmentService) GetRemoteHealth(ctx context.Context, id, userEmail string) (RemoteHealthStatus, error) {
@@ -318,6 +363,10 @@ func (s *EnvironmentService) completeRemoteBootstrap(ctx context.Context, id, us
 		return updatedEnv, err
 	}
 
+	if provisionedEnv.RepoURL != "" {
+		go s.cloneRepoIntoWorkspace(context.Background(), provisionedEnv)
+	}
+
 	return provisionedEnv, nil
 }
 
@@ -424,9 +473,26 @@ func (s *EnvironmentService) CreateEnvironment(ctx context.Context, userEmail st
 		return nil, err
 	}
 
+	if err := s.checkEnvironmentQuota(ctx, userEmail); err != nil {
+		return nil, err
+	}
+
 	image := strings.TrimSpace(input.Image)
+	templateID := strings.TrimSpace(input.TemplateID)
+	if templateID != "" {
+		template := TemplateByID(templateID)
+		if template == nil {
+			return nil, &ProvisionValidationError{Code: "invalid_template", Message: "unknown environment template"}
+		}
+		image = template.Image
+	}
 	if image == "" {
 		image = DefaultEnvironmentImage
+	}
+
+	repoURL, err := normalizeRepoURL(input.RepoURL)
+	if err != nil {
+		return nil, err
 	}
 
 	name := strings.TrimSpace(input.Name)
@@ -434,14 +500,16 @@ func (s *EnvironmentService) CreateEnvironment(ctx context.Context, userEmail st
 		name = generateEnvironmentName(userEmail)
 	}
 
+	s.metrics.RecordEnvironmentCreated(target)
+
 	switch target {
 	case createTargetCloud:
 		if strings.TrimSpace(input.Provision.Region) == "" {
 			return nil, &ProvisionValidationError{Code: "provision_required", Message: "provision settings are required when target is cloud"}
 		}
-		return s.createCloudEnvironment(ctx, userEmail, name, image, input.Provision)
+		return s.createCloudEnvironment(ctx, userEmail, name, image, repoURL, templateID, input.Provision)
 	default:
-		env, err := s.createLocalEnvironment(ctx, userEmail, name, image)
+		env, err := s.createLocalEnvironment(ctx, userEmail, name, image, repoURL, templateID)
 		if err != nil {
 			return nil, err
 		}
@@ -449,7 +517,21 @@ func (s *EnvironmentService) CreateEnvironment(ctx context.Context, userEmail st
 	}
 }
 
-func (s *EnvironmentService) createLocalEnvironment(ctx context.Context, userEmail, name, image string) (*models.Environment, error) {
+func (s *EnvironmentService) checkEnvironmentQuota(ctx context.Context, userEmail string) error {
+	if s.maxEnvironmentsPerUser <= 0 {
+		return nil
+	}
+	count, err := s.repo.CountByUserEmail(ctx, userEmail)
+	if err != nil {
+		return err
+	}
+	if count >= s.maxEnvironmentsPerUser {
+		return ErrEnvironmentQuotaExceeded
+	}
+	return nil
+}
+
+func (s *EnvironmentService) createLocalEnvironment(ctx context.Context, userEmail, name, image, repoURL, templateID string) (*models.Environment, error) {
 	containerID, err := s.resolver.LocalRuntime().CreateWorkspace(ctx, name, image, map[string]string{
 		"docklab.user_email": userEmail,
 		"docklab.name":       name,
@@ -458,16 +540,27 @@ func (s *EnvironmentService) createLocalEnvironment(ctx context.Context, userEma
 		return nil, err
 	}
 
-	return s.repo.Create(ctx, userEmail, name, image, statusRunning, containerID, creationModeLocal)
+	env, err := s.repo.Create(ctx, userEmail, name, image, statusRunning, containerID, creationModeLocal, repoURL, templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	if repoURL != "" {
+		// Clone in the background so creation stays fast; failures are logged via the
+		// container itself (re-runs are idempotent because the clone script checks first).
+		go s.cloneRepoIntoWorkspace(context.Background(), env)
+	}
+
+	return env, nil
 }
 
-func (s *EnvironmentService) createCloudEnvironment(ctx context.Context, userEmail, name, image string, provision ProvisionRequest) (*CreateEnvironmentResult, error) {
+func (s *EnvironmentService) createCloudEnvironment(ctx context.Context, userEmail, name, image, repoURL, templateID string, provision ProvisionRequest) (*CreateEnvironmentResult, error) {
 	sanitizedReq, err := validateProvisionRequest(provision)
 	if err != nil {
 		return nil, err
 	}
 
-	env, err := s.repo.Create(ctx, userEmail, name, image, statusStopped, newPlaceholderContainerID(), creationModeCloud)
+	env, err := s.repo.Create(ctx, userEmail, name, image, statusStopped, newPlaceholderContainerID(), creationModeCloud, repoURL, templateID)
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +620,8 @@ func (s *EnvironmentService) StartEnvironment(ctx context.Context, id, userEmail
 		if err != nil {
 			return nil, err
 		}
+		// The instance is billable again; resume usage tracking.
+		s.usage.EnsureSessionOpen(ctx, env)
 	}
 
 	if err := s.startWorkspace(ctx, env); err != nil {
@@ -594,7 +689,13 @@ func (s *EnvironmentService) DeleteEnvironment(ctx context.Context, id, userEmai
 		if err := s.deleteWorkspace(ctx, env); err != nil {
 			return err
 		}
+		// Best-effort cleanup of the named /workspace volume.
+		if runtime, runtimeErr := s.runtimeFor(env); runtimeErr == nil {
+			_ = runtime.DeleteWorkspaceVolume(ctx, workspaceContainerName(env))
+		}
 	}
+
+	s.usage.CloseSession(ctx, env.ID)
 
 	return s.repo.Delete(ctx, id, userEmail)
 }
@@ -644,6 +745,8 @@ func (s *EnvironmentService) DestroyCloudEnvironment(ctx context.Context, id, us
 	if err := s.destroyCloudResources(ctx, env, userEmail); err != nil {
 		return nil, err
 	}
+
+	s.usage.CloseSession(ctx, env.ID)
 
 	if env.CreationMode == creationModeCloud {
 		placeholderID := newPlaceholderContainerID()
@@ -743,7 +846,7 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 		now := time.Now().UTC()
 		cloudProvisionedAt = &now
 	}
-	_, err = s.repo.UpdateProvisioning(
+	provisionedEnv, err := s.repo.UpdateProvisioning(
 		ctx,
 		env.ID,
 		userEmail,
@@ -761,6 +864,9 @@ func (s *EnvironmentService) ProvisionEnvironment(ctx context.Context, id, userE
 		return nil, err
 	}
 
+	// EC2 starts billing as soon as the instance exists; open a usage session now.
+	s.usage.OpenSession(ctx, provisionedEnv)
+
 	return s.completeRemoteBootstrap(ctx, id, userEmail)
 }
 
@@ -769,6 +875,16 @@ func (s *EnvironmentService) GetEnvironment(ctx context.Context, id, userEmail s
 }
 
 func (s *EnvironmentService) queueOperation(ctx context.Context, userEmail, environmentID, operationType string, job func() error) (*models.Operation, error) {
+	if s.maxConcurrentOpsPerUser > 0 {
+		inProgress, err := s.operationRepo.CountInProgressForUser(ctx, userEmail)
+		if err != nil {
+			return nil, err
+		}
+		if inProgress >= s.maxConcurrentOpsPerUser {
+			return nil, ErrOperationQuotaExceeded
+		}
+	}
+
 	op, err := s.operationRepo.Create(ctx, userEmail, environmentID, operationType, opStatusQueued, "")
 	if err != nil {
 		return nil, err
@@ -779,9 +895,18 @@ func (s *EnvironmentService) queueOperation(ctx context.Context, userEmail, envi
 		err := job()
 		if err != nil {
 			_, _ = s.operationRepo.UpdateStatus(context.Background(), operationID, userEmail, opStatusFailed, err.Error())
+			s.metrics.RecordOperation(operationType, opStatusFailed)
+			s.alerts.Send("operation_failed", "error", "async operation failed", map[string]any{
+				"operation_id":   operationID,
+				"operation_type": operationType,
+				"environment_id": environmentID,
+				"user_email":     userEmail,
+				"error":          err.Error(),
+			})
 			return
 		}
 		_, _ = s.operationRepo.UpdateStatus(context.Background(), operationID, userEmail, opStatusSucceeded, "")
+		s.metrics.RecordOperation(operationType, opStatusSucceeded)
 	}(op.ID)
 
 	return op, nil
@@ -891,6 +1016,66 @@ func normalizeEC2KeyName(name string) string {
 		return name[:len(name)-4]
 	}
 	return name
+}
+
+// normalizeRepoURL validates the optional auto-clone repository URL.
+func normalizeRepoURL(repoURL string) (string, error) {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(repoURL, "https://") {
+		return "", &ProvisionValidationError{Code: "invalid_repo_url", Message: "repo_url must be an https:// git URL"}
+	}
+	if strings.ContainsAny(repoURL, " '\"`;|&<>") {
+		return "", &ProvisionValidationError{Code: "invalid_repo_url", Message: "repo_url contains invalid characters"}
+	}
+	return repoURL, nil
+}
+
+// buildCloneScript produces an idempotent shell script that installs git when missing
+// and clones the repository into /workspace.
+func buildCloneScript(repoURL string) string {
+	return fmt.Sprintf(
+		`set -e
+if ! command -v git >/dev/null 2>&1; then
+  (apk add --no-cache git >/dev/null 2>&1) || (apt-get update >/dev/null 2>&1 && apt-get install -y git >/dev/null 2>&1) || (dnf install -y git >/dev/null 2>&1) || (yum install -y git >/dev/null 2>&1)
+fi
+mkdir -p /workspace
+cd /workspace
+name=$(basename %s .git)
+if [ ! -d "$name" ]; then
+  git clone %s "$name"
+fi`,
+		shellQuote(repoURL),
+		shellQuote(repoURL),
+	)
+}
+
+// cloneRepoIntoWorkspace runs the auto-clone script inside the workspace container.
+func (s *EnvironmentService) cloneRepoIntoWorkspace(ctx context.Context, env *models.Environment) {
+	if env == nil || env.RepoURL == "" || isPlaceholderContainerID(env.ContainerID) {
+		return
+	}
+
+	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	script := buildCloneScript(env.RepoURL)
+
+	if s.resolver.LocalBackend() == RuntimeBackendKubernetes && env.RuntimeTarget != runtimeTargetRemote {
+		k8s := s.resolver.KubernetesRuntime()
+		_, _ = k8s.runKubectl(cloneCtx, "exec", "deploy/"+env.ContainerID, "--", "sh", "-c", script)
+		return
+	}
+
+	runtime, err := s.runtimeFor(env)
+	if err != nil {
+		return
+	}
+	if runner, ok := runtime.(dockerCommandRunner); ok {
+		_, _ = runner.runDocker(cloneCtx, "exec", workspaceContainerRef(env), "sh", "-c", script)
+	}
 }
 
 func normalizeCreateTarget(target string) (string, error) {

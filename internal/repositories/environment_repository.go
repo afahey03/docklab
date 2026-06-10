@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/afahey03/docklab/internal/models"
@@ -13,9 +14,12 @@ import (
 var ErrEnvironmentNotFound = errors.New("environment not found")
 
 type EnvironmentRepository interface {
-	Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode string) (*models.Environment, error)
+	Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode, repoURL, templateID string) (*models.Environment, error)
 	ListByUserEmail(ctx context.Context, userEmail string) ([]models.Environment, error)
+	ListSharedWithUser(ctx context.Context, userEmail string) ([]models.Environment, error)
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Environment, error)
+	GetByID(ctx context.Context, id string) (*models.Environment, error)
+	CountByUserEmail(ctx context.Context, userEmail string) (int, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status string) (*models.Environment, error)
 	UpdateProvisioning(ctx context.Context, id, userEmail, cloudStatus, cloudRegion, cloudInstanceType, cloudKeyName, instanceID, publicIP, terraformDir, cloudError string, cloudProvisionedAt *time.Time) (*models.Environment, error)
 	UpdateRuntime(ctx context.Context, id, userEmail, runtimeTarget, containerID, status string) (*models.Environment, error)
@@ -44,7 +48,7 @@ func NewPostgresEnvironmentRepository(db *pgxpool.Pool) *PostgresEnvironmentRepo
 }
 
 // envColumns is the canonical ordered column list used in all SELECT/RETURNING clauses.
-const envColumns = `id, user_email, name, image, status, container_id, creation_mode, runtime_target, cloud_status, cloud_region, cloud_instance_type, cloud_key_name, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
+const envColumns = `id, user_email, name, image, status, container_id, creation_mode, repo_url, template_id, runtime_target, cloud_status, cloud_region, cloud_instance_type, cloud_key_name, instance_id, public_ip, terraform_dir, cloud_error, cloud_provisioned_at, last_activity_at, created_at, updated_at`
 
 func scanEnv(row interface {
 	Scan(dest ...any) error
@@ -57,6 +61,8 @@ func scanEnv(row interface {
 		&env.Status,
 		&env.ContainerID,
 		&env.CreationMode,
+		&env.RepoURL,
+		&env.TemplateID,
 		&env.RuntimeTarget,
 		&env.CloudStatus,
 		&env.CloudRegion,
@@ -73,7 +79,7 @@ func scanEnv(row interface {
 	)
 }
 
-func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode string) (*models.Environment, error) {
+func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, name, image, status, containerID, creationMode, repoURL, templateID string) (*models.Environment, error) {
 	if r.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
@@ -83,12 +89,12 @@ func (r *PostgresEnvironmentRepository) Create(ctx context.Context, userEmail, n
 	}
 
 	query := `
-		INSERT INTO environments (user_email, name, image, status, container_id, creation_mode)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO environments (user_email, name, image, status, container_id, creation_mode, repo_url, template_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING ` + envColumns
 
 	var env models.Environment
-	if err := scanEnv(r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID, creationMode), &env); err != nil {
+	if err := scanEnv(r.db.QueryRow(ctx, query, userEmail, name, image, status, containerID, creationMode, repoURL, templateID), &env); err != nil {
 		return nil, err
 	}
 	return &env, nil
@@ -124,6 +130,54 @@ func (r *PostgresEnvironmentRepository) ListByUserEmail(ctx context.Context, use
 	}
 
 	return environments, nil
+}
+
+func (r *PostgresEnvironmentRepository) ListSharedWithUser(ctx context.Context, userEmail string) ([]models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + qualifiedEnvColumns("e") + `
+		FROM environments e
+		INNER JOIN environment_shares s ON s.environment_id = e.id
+		WHERE s.shared_with_email = $1
+		ORDER BY e.created_at DESC`
+
+	return r.queryEnvironments(ctx, query, userEmail)
+}
+
+func (r *PostgresEnvironmentRepository) CountByUserEmail(ctx context.Context, userEmail string) (int, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	var count int
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM environments WHERE user_email = $1`, userEmail).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (r *PostgresEnvironmentRepository) GetByID(ctx context.Context, id string) (*models.Environment, error) {
+	if r.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	query := `
+		SELECT ` + envColumns + `
+		FROM environments
+		WHERE id = $1`
+
+	var env models.Environment
+	err := scanEnv(r.db.QueryRow(ctx, query, id), &env)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrEnvironmentNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &env, nil
 }
 
 func (r *PostgresEnvironmentRepository) GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Environment, error) {
@@ -396,6 +450,15 @@ func (r *PostgresEnvironmentRepository) ReconcileMissingCloudInstances(ctx conte
 
 func orphanReconcileMessage() string {
 	return "EC2 instance no longer exists in AWS; cloud resources cleared during reconciliation"
+}
+
+// qualifiedEnvColumns prefixes every environment column with a table alias for joins.
+func qualifiedEnvColumns(alias string) string {
+	parts := strings.Split(envColumns, ", ")
+	for i, part := range parts {
+		parts[i] = alias + "." + part
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (r *PostgresEnvironmentRepository) queryEnvironments(ctx context.Context, query string, args ...any) ([]models.Environment, error) {

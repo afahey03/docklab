@@ -10,6 +10,8 @@ type Environment struct {
 	Status             string     `json:"status"`
 	ContainerID        string     `json:"container_id"`
 	CreationMode       string     `json:"creation_mode"`
+	RepoURL            string     `json:"repo_url"`
+	TemplateID         string     `json:"template_id"`
 	RuntimeTarget      string     `json:"runtime_target"`
 	CloudStatus        string     `json:"cloud_status"`
 	CloudRegion        string     `json:"cloud_region"`

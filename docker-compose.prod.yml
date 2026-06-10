@@ -1,0 +1,118 @@
+# Production deployment using prebuilt GHCR images (published by .github/workflows/cd.yml).
+# Copy this file to the deploy host and run:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# No .env file is required. The only variable Compose itself needs is
+# POSTGRES_PASSWORD (the co-located Postgres container can't read Secrets
+# Manager) — export it in the shell or via SSM. Everything else, including
+# JWT_SECRET, AWS credentials, OAuth secrets, and the SSH key
+# (DOKLAB_SSH_PRIVATE_KEY_B64), can be hydrated at boot from AWS Secrets
+# Manager by setting DOKLAB_SECRETS_MANAGER_SECRET_ID.
+services:
+  backend:
+    image: ${DOKLAB_BACKEND_IMAGE:-ghcr.io/afahey03/docklab-backend:latest}
+    container_name: docklab-backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      PORT: "8080"
+      # Override DATABASE_URL only when using an external database; the default
+      # points at the co-located postgres service below.
+      DATABASE_URL: ${DATABASE_URL:-host=postgres port=5432 user=postgres password=${POSTGRES_PASSWORD:-} dbname=docklab sslmode=disable}
+      # From env or the Secrets Manager secret. The backend refuses to start in
+      # production if neither provides a real value.
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-60}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # Optional: hydrate secrets from AWS Secrets Manager at boot instead of env vars.
+      DOKLAB_SECRETS_MANAGER_SECRET_ID: ${DOKLAB_SECRETS_MANAGER_SECRET_ID:-}
+      DOKLAB_SECRETS_MANAGER_REGION: ${DOKLAB_SECRETS_MANAGER_REGION:-}
+      # Static AWS keys are optional: the backend uses the default credential
+      # chain, so an EC2 instance profile / ECS task role works with no keys set.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      DOKLAB_TERRAFORM_STATE_BUCKET: ${DOKLAB_TERRAFORM_STATE_BUCKET:-}
+      DOKLAB_TERRAFORM_STATE_REGION: ${DOKLAB_TERRAFORM_STATE_REGION:-us-east-1}
+      DOKLAB_TERRAFORM_STATE_TABLE: ${DOKLAB_TERRAFORM_STATE_TABLE:-}
+      DOKLAB_TERRAFORM_STATE_KEY_PREFIX: ${DOKLAB_TERRAFORM_STATE_KEY_PREFIX:-docklab/environments}
+      IDLE_STOP_AFTER_MINUTES: ${IDLE_STOP_AFTER_MINUTES:-60}
+      IDLE_CLOUD_STOP_AFTER_MINUTES: ${IDLE_CLOUD_STOP_AFTER_MINUTES:-}
+      IDLE_CLOUD_TERMINATE_AFTER_MINUTES: ${IDLE_CLOUD_TERMINATE_AFTER_MINUTES:-1440}
+      DOKLAB_CLOUD_IDLE_POLICY_ENABLED: ${DOKLAB_CLOUD_IDLE_POLICY_ENABLED:-true}
+      # SSH key for remote environments: either mount a .pem (see volumes below)
+      # or deliver it base64-encoded via env/Secrets Manager — when
+      # DOKLAB_SSH_PRIVATE_KEY_B64 is set it takes precedence over the path.
+      DOKLAB_SSH_PRIVATE_KEY_PATH: /run/secrets/docklab-ssh-key.pem
+      DOKLAB_SSH_PRIVATE_KEY_B64: ${DOKLAB_SSH_PRIVATE_KEY_B64:-}
+      DOKLAB_SSH_USER: ${DOKLAB_SSH_USER:-ec2-user}
+      DOKLAB_SSH_PORT: ${DOKLAB_SSH_PORT:-22}
+      DOKLAB_SSH_CONNECT_TIMEOUT_SECONDS: ${DOKLAB_SSH_CONNECT_TIMEOUT_SECONDS:-15}
+      DOKLAB_REMOTE_BOOTSTRAP_TIMEOUT_SECONDS: ${DOKLAB_REMOTE_BOOTSTRAP_TIMEOUT_SECONDS:-300}
+      # Production hardening
+      DOKLAB_RATE_LIMIT_ENABLED: ${DOKLAB_RATE_LIMIT_ENABLED:-true}
+      DOKLAB_AUTH_RATE_LIMIT_PER_MINUTE: ${DOKLAB_AUTH_RATE_LIMIT_PER_MINUTE:-20}
+      DOKLAB_PROVISION_RATE_LIMIT_PER_MINUTE: ${DOKLAB_PROVISION_RATE_LIMIT_PER_MINUTE:-10}
+      DOKLAB_API_RATE_LIMIT_PER_MINUTE: ${DOKLAB_API_RATE_LIMIT_PER_MINUTE:-240}
+      DOKLAB_MAX_ENVIRONMENTS_PER_USER: ${DOKLAB_MAX_ENVIRONMENTS_PER_USER:-10}
+      DOKLAB_MAX_CONCURRENT_OPERATIONS_PER_USER: ${DOKLAB_MAX_CONCURRENT_OPERATIONS_PER_USER:-3}
+      DOKLAB_METRICS_ENABLED: ${DOKLAB_METRICS_ENABLED:-true}
+      DOKLAB_ALERT_WEBHOOK_URL: ${DOKLAB_ALERT_WEBHOOK_URL:-}
+      DOKLAB_FRONTEND_BASE_URL: ${DOKLAB_FRONTEND_BASE_URL:-http://localhost:5173}
+      # GitHub OAuth (optional)
+      DOKLAB_GITHUB_CLIENT_ID: ${DOKLAB_GITHUB_CLIENT_ID:-}
+      DOKLAB_GITHUB_CLIENT_SECRET: ${DOKLAB_GITHUB_CLIENT_SECRET:-}
+      DOKLAB_GITHUB_REDIRECT_URL: ${DOKLAB_GITHUB_REDIRECT_URL:-}
+      # Cost tracking
+      DOKLAB_PRICING_API_ENABLED: ${DOKLAB_PRICING_API_ENABLED:-true}
+      # Runtime backend: docker (default) or kubernetes
+      DOKLAB_RUNTIME: ${DOKLAB_RUNTIME:-docker}
+      DOKLAB_K8S_NAMESPACE: ${DOKLAB_K8S_NAMESPACE:-docklab}
+      DOKLAB_K8S_CONTEXT: ${DOKLAB_K8S_CONTEXT:-}
+      # Browser IDE
+      DOKLAB_IDE_ENABLED: ${DOKLAB_IDE_ENABLED:-true}
+      DOKLAB_IDE_IMAGE: ${DOKLAB_IDE_IMAGE:-codercom/code-server:latest}
+      DOKLAB_IDE_REMOTE_PORT: ${DOKLAB_IDE_REMOTE_PORT:-8443}
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: ${DOKLAB_SSH_PRIVATE_KEY_HOST_PATH:-./keys/docklab-key.pem}
+        target: /run/secrets/docklab-ssh-key.pem
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: ${DOKLAB_FRONTEND_IMAGE:-ghcr.io/afahey03/docklab-frontend:latest}
+    container_name: docklab-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: docklab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: docklab
+      POSTGRES_USER: postgres
+      # The only required host-level variable: export it in the deploy shell
+      # (e.g. from SSM) — no .env file needed.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?export POSTGRES_PASSWORD on the deploy host}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d docklab"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

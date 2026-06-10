@@ -17,6 +17,7 @@ type OperationRepository interface {
 	GetByIDForUser(ctx context.Context, id, userEmail string) (*models.Operation, error)
 	UpdateStatus(ctx context.Context, id, userEmail, status, errorMessage string) (*models.Operation, error)
 	ExistsInProgressForEnvironment(ctx context.Context, environmentID, userEmail string) (bool, error)
+	CountInProgressForUser(ctx context.Context, userEmail string) (int, error)
 	FailStaleInProgressForEnvironment(ctx context.Context, environmentID, userEmail string, olderThan time.Duration) (int64, error)
 	FailInProgressForEnvironment(ctx context.Context, environmentID, userEmail, reason string) (int64, error)
 
@@ -147,6 +148,24 @@ func (r *PostgresOperationRepository) ExistsInProgressForEnvironment(ctx context
 	}
 
 	return exists, nil
+}
+
+func (r *PostgresOperationRepository) CountInProgressForUser(ctx context.Context, userEmail string) (int, error) {
+	if r.db == nil {
+		return 0, errors.New("database connection is nil")
+	}
+
+	const query = `
+		SELECT COUNT(*)
+		FROM operations
+		WHERE user_email = $1
+		  AND status IN ('queued', 'running')`
+
+	var count int
+	if err := r.db.QueryRow(ctx, query, userEmail).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *PostgresOperationRepository) FailStaleInProgressForEnvironment(ctx context.Context, environmentID, userEmail string, olderThan time.Duration) (int64, error) {

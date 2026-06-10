@@ -177,40 +177,61 @@ Stop paying for idle cloud resources.
 
 ---
 
-## Sprint 9 🔲 Production Hardening and Deployment
+## Sprint 9 ✅ Production Hardening and Deployment
 
 ### Goal
 Move from a local dev demo to something deployable and operable in production.
 
-### Scope
-- Deployment pipeline (CD): staged deploy to a hosted environment (e.g. ECS, Fly.io, or EC2 + Docker Compose)
-- Rate limiting on auth and provisioning endpoints
-- Structured metrics and health dashboards (Prometheus/CloudWatch or equivalent)
-- Alerting on failed operations, reconciliation events, and worker errors
-- Secrets management (no plaintext AWS keys in env files for production)
-- Resource quotas per user (max environments, max concurrent operations)
-- Expanded test coverage for environment, terraform, and operation flows
-- Optional: JWT refresh tokens
+### Delivered
+- CD pipeline (`.github/workflows/cd.yml`): backend + frontend images built and pushed to GHCR on `main`, optional SSH deploy that pulls and restarts `docker-compose.prod.yml` on the host
+- `docker-compose.prod.yml` (GHCR images, nginx-served frontend, Postgres with password) and `frontend/Dockerfile` + `nginx.conf`
+- Per-IP token bucket rate limiting with separate budgets: auth (`20/min`), provisioning (`10/min`), general API (`240/min`) — configurable, returns `429` + `Retry-After`
+- Prometheus `/metrics`: HTTP request counts/latency, operation outcomes, environments created, terminal clients, lifecycle actions, alerts
+- Webhook alerting (`DOKLAB_ALERT_WEBHOOK_URL`): failed operations, cloud lifecycle actions/failures, reconciliation repairs, budget overruns
+- AWS Secrets Manager bootstrap (`DOKLAB_SECRETS_MANAGER_SECRET_ID`): hydrates env vars from a JSON secret before config load
+- `.env`-free production: EC2/Pricing clients use the default AWS credential chain (IAM instance profiles work with no static keys), the EC2 SSH key can be delivered base64-encoded via `DOKLAB_SSH_PRIVATE_KEY_B64` (materialized to a `0600` file at boot), and `docker-compose.prod.yml` only requires `POSTGRES_PASSWORD` exported on the host; the backend refuses to start in production with the default JWT secret
+- Per-user quotas: max environments and max concurrent operations with typed `429` API errors
+- JWT refresh tokens: rotating single-use tokens (SHA-256 hashed at rest), `POST /auth/refresh`, `POST /auth/logout`, frontend auto-refresh on `401`
+- GitHub OAuth login: `GET /auth/github/login` + callback, signed-JWT state, user upsert (`auth_provider`), tokens delivered via URL fragment
+- Expanded test coverage: refresh rotation/revocation, rate limiter behavior, pricing fallback/caching, repo URL validation, template catalog
 
-### Definition of Done
-- Platform runs in a non-local hosted environment with monitoring and automated deploys.
-- Basic abuse and cost-runaway protections are in place.
+### Definition of Done — Met
+- Platform is deployable to a hosted Docker Compose environment with automated image delivery, metrics, and alerting.
+- Abuse (rate limits, quotas) and cost-runaway (budgets, idle lifecycle) protections are in place.
 
 ---
 
-## Sprint 10 🔲 Cost Tracking Hardening (Stretch)
+## Sprint 10 ✅ Cost Tracking Hardening
 
 ### Goal
 Turn cost estimates into durable, auditable usage data.
 
-### Scope
-- `environment_usage` table: runtime minutes, estimated cost, started/ended timestamps
-- Usage history UI with charts and export
-- AWS Pricing API integration for accurate regional rates
-- Cost alerts or budget thresholds
+### Delivered
+- `environment_usage` table: per-session hourly rate, started/ended timestamps, runtime minutes, estimated cost; sessions open/close automatically across provision, start, stop, terminate, delete, and reconciliation
+- AWS Pricing API integration with in-memory caching and a static on-demand rate fallback (`GET /api/v1/pricing`)
+- Usage history UI: session table, month-to-date and all-time totals, per-environment cost bars for the current month
+- Budgets: `user_settings` table, `GET/PUT /api/v1/billing/budget`, budget watcher worker raising once-per-month webhook alerts, over-budget indicator in the dashboard
 
-### Definition of Done
+### Definition of Done — Met
 - Users can review historical usage and cost per environment, not just live estimates.
+
+---
+
+## Sprint 11 ✅ Advanced Features (former "avoid initially" scope)
+
+### Goal
+Deliver the Phase 10 stretch features: IDE, snapshots, collaboration, GitHub repos, templates, Kubernetes.
+
+### Delivered
+- **Browser IDE**: code-server sidecar per workspace (`POST /environments/:id/ide/start|stop`, status endpoint); shares the workspace volume; random password per start; localhost port mapping locally, port `8443` on EC2 (Terraform SG updated); dashboard Manage panel shows URL + password
+- **Workspace snapshots**: `docker commit`-based snapshot/restore/delete APIs and UI; workspaces now mount a named volume (`docklab-ws-<name>`) at `/workspace` preserved across restores; unsupported on the Kubernetes backend
+- **Collaboration**: `environment_shares` table, share/unshare APIs, `shared_environments` in the list response, "Shared with you" dashboard section, and multi-client shared terminal sessions (one PTY broadcast to all connected clients)
+- **GitHub integration**: OAuth login (Sprint 9) plus `repo_url` auto-clone into `/workspace` at create time (https-only, shell-injection-safe validation)
+- **Template marketplace**: curated template catalog (`GET /api/v1/templates`) with Node.js, Go, Python, Rust, Java, and base images; dashboard template picker
+- **Kubernetes runtime**: `DOKLAB_RUNTIME=kubernetes` schedules local workspaces as `kubectl` Deployments (stop/start = scale 0/1, terminal via `kubectl exec`); kubectl bundled in the backend image
+
+### Definition of Done — Met
+- Every Phase 10 feature is usable end to end from the dashboard with documented limitations (IDE/snapshots are Docker-only).
 
 ---
 
@@ -226,5 +247,6 @@ Turn cost estimates into durable, auditable usage data.
 | 6 | ✅ Done | Cost visibility + CI |
 | 7 | ✅ Done | Remote orchestration |
 | 8 | ✅ Done | Cloud lifecycle automation |
-| 9 | 🔲 Next | Production hardening + deployment |
-| 10 | 🔲 Stretch | Durable cost tracking |
+| 9 | ✅ Done | Production hardening + deployment |
+| 10 | ✅ Done | Durable cost tracking |
+| 11 | ✅ Done | Advanced features (IDE, snapshots, sharing, templates, K8s) |

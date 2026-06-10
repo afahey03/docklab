@@ -13,11 +13,14 @@ import {
     getLifecyclePolicy,
     getMe,
     getOperation,
+    getTemplates,
+    logout,
     type LifecyclePolicy,
     provisionEnvironment,
     startEnvironment,
     stopEnvironment,
     type Environment,
+    type EnvironmentTemplate,
     type Operation,
     type RemoteHealthStatus,
 } from "../lib/api";
@@ -27,6 +30,8 @@ import {
     hasTransitioningCloudEnvironments,
     isCloudCreation,
 } from "../lib/environmentCapabilities";
+import { BillingView } from "../components/BillingView";
+import { EnvironmentManagePanel } from "../components/EnvironmentManagePanel";
 
 type EnvironmentAction = "start" | "stop" | "delete" | "provision" | "destroy_cloud" | "retry_bootstrap";
 type ConfirmAction = "delete_environment" | "destroy_cloud";
@@ -68,68 +73,6 @@ const OPERATION_POLL_INTERVAL_MS = 2000;
 const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
 const RUNNING_ENVIRONMENT_REFRESH_INTERVAL_MS = 5000;
 const IDLE_ENVIRONMENT_REFRESH_INTERVAL_MS = 30000;
-
-const INSTANCE_HOURLY_RATE_USD: Record<string, number> = {
-    "t3.nano": 0.0052,
-    "t3.micro": 0.0104,
-    "t3.small": 0.0208,
-    "t3.medium": 0.0416,
-    "t3.large": 0.0832,
-    "t3.xlarge": 0.1664,
-    "t3.2xlarge": 0.3328,
-};
-
-const currencyFormatter = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-});
-
-type EnvironmentUsageSummary = {
-    isCloudActive: boolean;
-    runtimeHours: number | null;
-    formattedRuntime: string;
-    hourlyRate: number | null;
-    estimatedSpend: number | null;
-    estimatedMonthly: number | null;
-};
-
-function getCloudHourlyRate(instanceType: string): number | null {
-    if (!instanceType) {
-        return null;
-    }
-
-    return INSTANCE_HOURLY_RATE_USD[instanceType.toLowerCase()] ?? null;
-}
-
-function formatCurrency(value: number | null): string {
-    if (value === null) {
-        return "N/A";
-    }
-
-    return currencyFormatter.format(value);
-}
-
-function formatRuntimeHours(hours: number | null): string {
-    if (hours === null || !Number.isFinite(hours) || hours < 0) {
-        return "N/A";
-    }
-
-    const totalMinutes = Math.max(0, Math.floor(hours * 60));
-    const days = Math.floor(totalMinutes / (24 * 60));
-    const remainingMinutesAfterDays = totalMinutes % (24 * 60);
-    const wholeHours = Math.floor(remainingMinutesAfterDays / 60);
-    const minutes = remainingMinutesAfterDays % 60;
-
-    if (days > 0) {
-        return `${days}d ${wholeHours}h`;
-    }
-    if (wholeHours > 0) {
-        return `${wholeHours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
-}
 
 function validateCloudProvisionFields(provision: CloudProvisionFields): string | null {
     if (!provision.region.trim()) {
@@ -197,41 +140,16 @@ function CloudProvisionFieldsForm({
     );
 }
 
-function getEnvironmentUsageSummary(env: Environment): EnvironmentUsageSummary {
-    const isCloudActive = env.cloud_status === "provisioned" && Boolean(env.instance_id);
-    const hourlyRate = getCloudHourlyRate(env.cloud_instance_type);
-
-    if (!isCloudActive || !env.cloud_provisioned_at) {
-        return {
-            isCloudActive,
-            runtimeHours: null,
-            formattedRuntime: "N/A",
-            hourlyRate,
-            estimatedSpend: null,
-            estimatedMonthly: hourlyRate === null ? null : hourlyRate * 24 * 30,
-        };
-    }
-
-    const provisionedAt = new Date(env.cloud_provisioned_at);
-    const runtimeHours = Number.isNaN(provisionedAt.getTime())
-        ? null
-        : Math.max(0, (Date.now() - provisionedAt.getTime()) / (1000 * 60 * 60));
-
-    return {
-        isCloudActive,
-        runtimeHours,
-        formattedRuntime: formatRuntimeHours(runtimeHours),
-        hourlyRate,
-        estimatedSpend: runtimeHours === null || hourlyRate === null ? null : runtimeHours * hourlyRate,
-        estimatedMonthly: hourlyRate === null ? null : hourlyRate * 24 * 30,
-    };
-}
-
 export function DashboardPage() {
     const navigate = useNavigate();
     const [activeView, setActiveView] = useState<DashboardView>("environments");
     const [email, setEmail] = useState("");
     const [environments, setEnvironments] = useState<Environment[]>([]);
+    const [sharedEnvironments, setSharedEnvironments] = useState<Environment[]>([]);
+    const [templates, setTemplates] = useState<EnvironmentTemplate[]>([]);
+    const [selectedTemplateId, setSelectedTemplateId] = useState("");
+    const [repoUrl, setRepoUrl] = useState("");
+    const [manageEnvironmentId, setManageEnvironmentId] = useState("");
     const [name, setName] = useState("");
     const [image, setImage] = useState("alpine:3.20");
     const [createTarget, setCreateTarget] = useState<CreateTarget>("local");
@@ -266,15 +184,6 @@ export function DashboardPage() {
     const terminalReconnectTimerRef = useRef<number | null>(null);
     const manualTerminalCloseRef = useRef(false);
     const reconnectAttemptsRef = useRef(0);
-    const environmentUsage = environments.map((environment) => ({
-        environment,
-        usage: getEnvironmentUsageSummary(environment),
-    }));
-    const activeCloudUsage = environmentUsage.filter((entry) => entry.usage.isCloudActive);
-    const activeCloudEnvironmentCount = environmentUsage.filter((entry) => entry.usage.isCloudActive).length;
-    const totalEstimatedSpend = environmentUsage.reduce((total, entry) => total + (entry.usage.estimatedSpend ?? 0), 0);
-    const totalEstimatedMonthly = environmentUsage.reduce((total, entry) => total + (entry.usage.estimatedMonthly ?? 0), 0);
-
     useEffect(() => {
         if (!terminalContainerRef.current) {
             return;
@@ -368,19 +277,27 @@ export function DashboardPage() {
     useEffect(() => {
         async function bootstrapDashboard() {
             try {
-                const [user, envs, policy] = await Promise.all([
+                const [user, envList, policy] = await Promise.all([
                     getMe(),
                     getEnvironments(),
                     getLifecyclePolicy(),
                 ]);
                 setEmail(user.email);
-                setEnvironments(envs);
+                setEnvironments(envList.environments);
+                setSharedEnvironments(envList.sharedEnvironments);
                 setLifecyclePolicy(policy);
             } catch {
                 clearToken();
                 navigate("/login", { replace: true });
+                return;
             } finally {
                 setIsLoadingEnvironments(false);
+            }
+
+            try {
+                setTemplates(await getTemplates());
+            } catch {
+                // The template catalog is optional; creation by raw image still works.
             }
         }
 
@@ -420,8 +337,10 @@ export function DashboardPage() {
 
     function handleSignOut() {
         closeTerminal();
-        clearToken();
-        navigate("/login", { replace: true });
+        void logout().finally(() => {
+            clearToken();
+            navigate("/login", { replace: true });
+        });
     }
 
     function closeTerminal() {
@@ -532,8 +451,9 @@ export function DashboardPage() {
     }
 
     async function refreshEnvironments() {
-        const envs = await getEnvironments();
-        setEnvironments(envs);
+        const envList = await getEnvironments();
+        setEnvironments(envList.environments);
+        setSharedEnvironments(envList.sharedEnvironments);
     }
 
     function replaceEnvironment(updated: Environment) {
@@ -617,6 +537,8 @@ export function DashboardPage() {
                 name: trimmedName,
                 image: trimmedImage,
                 target: createTarget,
+                repo_url: repoUrl.trim(),
+                template_id: selectedTemplateId,
                 provision: createTarget === "cloud"
                     ? {
                         region: createCloudProvision.region.trim(),
@@ -639,11 +561,26 @@ export function DashboardPage() {
 
             await refreshEnvironments();
             setName("");
+            setRepoUrl("");
+            setSelectedTemplateId("");
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "failed to create environment");
         } finally {
             setIsCreating(false);
         }
+    }
+
+    function handleSelectTemplate(template: EnvironmentTemplate) {
+        if (selectedTemplateId === template.id) {
+            setSelectedTemplateId("");
+            return;
+        }
+        setSelectedTemplateId(template.id);
+        setImage(template.image);
+    }
+
+    function toggleManagePanel(environmentId: string) {
+        setManageEnvironmentId((current) => (current === environmentId ? "" : environmentId));
     }
 
     async function handleStartEnvironment(id: string) {
@@ -962,6 +899,29 @@ export function DashboardPage() {
                                         </button>
                                     </div>
 
+                                    {templates.length > 0 ? (
+                                        <div className="mt-4">
+                                            <p className="text-xs uppercase tracking-wide text-slate-500">Templates</p>
+                                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                                {templates.map((template) => (
+                                                    <button
+                                                        key={template.id}
+                                                        className={`rounded-md border p-2 text-left ${selectedTemplateId === template.id ? "border-cyan-600 bg-cyan-950/40" : "border-slate-800 bg-slate-950 hover:border-slate-600"}`}
+                                                        type="button"
+                                                        disabled={isCreating}
+                                                        onClick={() => handleSelectTemplate(template)}
+                                                    >
+                                                        <p className="text-sm font-medium text-slate-100">{template.name}</p>
+                                                        <p className="mt-0.5 text-xs text-slate-400">{template.description}</p>
+                                                        <p className="mt-1 text-[11px] text-slate-500">
+                                                            {template.image} | {template.language}
+                                                        </p>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : null}
+
                                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                                         <input
                                             className={darkFieldClassName}
@@ -974,8 +934,18 @@ export function DashboardPage() {
                                             className={darkFieldClassName}
                                             placeholder="Docker image"
                                             value={image}
-                                            onChange={(event) => setImage(event.target.value)}
+                                            onChange={(event) => {
+                                                setImage(event.target.value);
+                                                setSelectedTemplateId("");
+                                            }}
                                             maxLength={128}
+                                        />
+                                        <input
+                                            className={`${darkFieldClassName} md:col-span-2`}
+                                            placeholder="Git repository to clone (optional, e.g. https://github.com/user/repo)"
+                                            value={repoUrl}
+                                            onChange={(event) => setRepoUrl(event.target.value)}
+                                            maxLength={256}
                                         />
                                     </div>
 
@@ -1033,7 +1003,7 @@ export function DashboardPage() {
                                         <p className="mt-1 text-sm text-slate-400">No environments yet.</p>
                                     ) : (
                                         <div className="mt-3 space-y-3">
-                                            {environmentUsage.map(({ environment: env }) => {
+                                            {environments.map((env) => {
                                                 const capabilities = getEnvironmentCapabilities(env, isEnvironmentPending(env.id));
                                                 const remoteHealth = remoteHealthByEnvironment[env.id];
 
@@ -1188,13 +1158,61 @@ export function DashboardPage() {
                                                                 Check remote health
                                                             </button>
                                                         ) : null}
+                                                        <button
+                                                            className={`rounded-md border px-3 py-1 text-xs ${manageEnvironmentId === env.id ? "border-cyan-600 bg-cyan-950 text-cyan-200" : "border-slate-600 text-slate-300 hover:bg-slate-900"}`}
+                                                            type="button"
+                                                            onClick={() => toggleManagePanel(env.id)}
+                                                        >
+                                                            {manageEnvironmentId === env.id ? "Hide manage" : "Manage"}
+                                                        </button>
                                                     </div>
+
+                                                    {manageEnvironmentId === env.id ? (
+                                                        <EnvironmentManagePanel
+                                                            environment={env}
+                                                            onEnvironmentChanged={() => void refreshEnvironments()}
+                                                            onError={setError}
+                                                            onNotice={setNotice}
+                                                        />
+                                                    ) : null}
                                                 </div>
                                                 );
                                             })}
                                         </div>
                                     )}
                                 </article>
+
+                                {sharedEnvironments.length > 0 ? (
+                                    <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                                        <h3 className="font-medium">Shared with you</h3>
+                                        <p className="mt-1 text-sm text-slate-400">
+                                            Environments other users shared with you. You can open a collaborative terminal.
+                                        </p>
+                                        <div className="mt-3 space-y-3">
+                                            {sharedEnvironments.map((env) => (
+                                                <div key={env.id} className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                        <div>
+                                                            <p className="font-medium text-slate-100">{env.name}</p>
+                                                            <p className="text-xs text-slate-400">{env.image}</p>
+                                                            <p className="text-xs text-slate-500">
+                                                                Owner: {env.user_email} | Status: {env.status}
+                                                            </p>
+                                                        </div>
+                                                        <button
+                                                            className="rounded-md border border-cyan-700 px-3 py-1 text-xs text-cyan-300 hover:bg-cyan-950 disabled:cursor-not-allowed disabled:opacity-50"
+                                                            type="button"
+                                                            disabled={env.status !== "running" || activeTerminalEnvironmentId === env.id}
+                                                            onClick={() => openTerminal(env.id)}
+                                                        >
+                                                            {activeTerminalEnvironmentId === env.id ? "Terminal open" : "Terminal"}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </article>
+                                ) : null}
 
                                 <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
                                     <div className="flex items-center justify-between">
@@ -1242,85 +1260,7 @@ export function DashboardPage() {
                         ) : null}
 
                         {activeView === "usage" ? (
-                            <>
-                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                                    <div className="flex items-center justify-between gap-3">
-                                        <div>
-                                            <h3 className="font-medium">Usage & cost overview</h3>
-                                            <p className="mt-1 text-sm text-slate-400">
-                                                Estimated EC2 runtime spend based on tracked provision time and common on-demand rates.
-                                            </p>
-                                        </div>
-                                        <p className="text-xs text-slate-500">Rates are estimates, not AWS billing data.</p>
-                                    </div>
-
-                                    <div className="mt-4 grid gap-3 md:grid-cols-3">
-                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                                            <p className="text-xs uppercase tracking-wide text-slate-500">Cloud environments</p>
-                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{activeCloudEnvironmentCount}</p>
-                                            <p className="mt-1 text-xs text-slate-400">Provisioned or deprovisioning environments with tracked cloud state.</p>
-                                        </div>
-                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                                            <p className="text-xs uppercase tracking-wide text-slate-500">Estimated accrued spend</p>
-                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{formatCurrency(totalEstimatedSpend)}</p>
-                                            <p className="mt-1 text-xs text-slate-400">Based on runtime since `cloud_provisioned_at`.</p>
-                                        </div>
-                                        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                                            <p className="text-xs uppercase tracking-wide text-slate-500">Projected monthly run rate</p>
-                                            <p className="mt-2 text-2xl font-semibold text-slate-100">{formatCurrency(totalEstimatedMonthly)}</p>
-                                            <p className="mt-1 text-xs text-slate-400">Assumes the current instance mix runs 24/7 for 30 days.</p>
-                                        </div>
-                                    </div>
-                                </article>
-
-                                <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-                                    <h3 className="font-medium">Cloud environment estimates</h3>
-                                    {activeCloudUsage.length === 0 ? (
-                                        <p className="mt-2 text-sm text-slate-400">No provisioned cloud environments to estimate yet.</p>
-                                    ) : (
-                                        <div className="mt-3 space-y-3">
-                                            {activeCloudUsage.map(({ environment: env, usage }) => (
-                                                <div key={env.id} className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                                        <div>
-                                                            <p className="font-medium text-slate-100">{env.name}</p>
-                                                            <p className="text-xs text-slate-500">
-                                                                {env.cloud_instance_type || "Unknown type"}
-                                                                {env.cloud_region ? ` | ${env.cloud_region}` : ""}
-                                                                {env.instance_id ? ` | ${env.instance_id}` : ""}
-                                                            </p>
-                                                        </div>
-                                                        <span className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300">
-                                                            {env.cloud_status}
-                                                        </span>
-                                                    </div>
-
-                                                    <div className="mt-3 grid gap-3 md:grid-cols-4">
-                                                        <div>
-                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Runtime</p>
-                                                            <p className="mt-1 text-sm text-slate-100">{usage.formattedRuntime}</p>
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Hourly rate</p>
-                                                            <p className="mt-1 text-sm text-slate-100">
-                                                                {usage.hourlyRate !== null ? `${formatCurrency(usage.hourlyRate)}/hr` : "N/A"}
-                                                            </p>
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Accrued estimate</p>
-                                                            <p className="mt-1 text-sm text-slate-100">{formatCurrency(usage.estimatedSpend)}</p>
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-xs uppercase tracking-wide text-slate-500">Monthly run rate</p>
-                                                            <p className="mt-1 text-sm text-slate-100">{formatCurrency(usage.estimatedMonthly)}</p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </article>
-                            </>
+                            <BillingView onError={setError} onNotice={setNotice} />
                         ) : null}
 
                     </section>

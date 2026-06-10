@@ -22,6 +22,11 @@ type LifecycleService struct {
 	resolver        *RuntimeResolver
 	idleThreshold   time.Duration
 	log             *slog.Logger
+	metrics         *Metrics
+}
+
+func (s *LifecycleService) SetMetrics(metrics *Metrics) {
+	s.metrics = metrics
 }
 
 func NewLifecycleService(
@@ -119,5 +124,6 @@ func (s *LifecycleService) stopIdleEnvironments(ctx context.Context) {
 				"error", err,
 			)
 		}
+		s.metrics.RecordLifecycleAction("workspace_stop")
 	}
 }

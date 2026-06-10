@@ -31,6 +31,13 @@ type ReconciliationService struct {
 	operationRepo   repositories.OperationRepository
 	ec2             EC2InstanceClient
 	log             *slog.Logger
+	alerts          *AlertService
+	usage           *UsageService
+}
+
+func (s *ReconciliationService) SetObservability(alerts *AlertService, usage *UsageService) {
+	s.alerts = alerts
+	s.usage = usage
 }
 
 func NewReconciliationService(
@@ -75,6 +82,7 @@ func (s *ReconciliationService) runOnce(ctx context.Context) {
 		s.log.Error("reconciliation: failed to mark stale operations", "error", err)
 	} else if stalOps > 0 {
 		s.log.Warn("reconciliation: marked stale operations as failed", "count", stalOps)
+		s.alerts.Send("reconciliation_stale_operations", "warning", "stale operations marked failed", map[string]any{"count": stalOps})
 	}
 
 	// 2. Mark environments stuck in a transitional cloud_status as provision_failed.
@@ -83,6 +91,7 @@ func (s *ReconciliationService) runOnce(ctx context.Context) {
 		s.log.Error("reconciliation: failed to reconcile stale provisioning", "error", err)
 	} else if staleEnvs > 0 {
 		s.log.Warn("reconciliation: marked stale provisioning environments as failed", "count", staleEnvs)
+		s.alerts.Send("reconciliation_stale_provisioning", "warning", "stale provisioning environments repaired", map[string]any{"count": staleEnvs})
 	}
 
 	s.reconcileMissingCloudInstances(ctx)
@@ -100,14 +109,17 @@ func (s *ReconciliationService) reconcileMissingCloudInstances(ctx context.Conte
 	}
 
 	missing := make([]string, 0)
+	missingEnvIDs := make([]string, 0)
 	for _, env := range envs {
 		state, describeErr := s.ec2.DescribeInstance(ctx, env.CloudRegion, env.InstanceID)
 		if describeErr != nil {
 			missing = append(missing, env.InstanceID)
+			missingEnvIDs = append(missingEnvIDs, env.ID)
 			continue
 		}
 		if state == nil || isEC2InstanceTerminated(state.State) {
 			missing = append(missing, env.InstanceID)
+			missingEnvIDs = append(missingEnvIDs, env.ID)
 		}
 	}
 
@@ -122,5 +134,9 @@ func (s *ReconciliationService) reconcileMissingCloudInstances(ctx context.Conte
 	}
 	if updated > 0 {
 		s.log.Warn("reconciliation: cleared environments with missing ec2 instances", "count", updated)
+		s.alerts.Send("reconciliation_missing_instances", "warning", "environments with missing EC2 instances cleared", map[string]any{"count": updated})
+		for _, envID := range missingEnvIDs {
+			s.usage.CloseSession(ctx, envID)
+		}
 	}
 }

@@ -14,9 +14,9 @@ Build a cloud-based remote development environment platform where users can prov
 
 ### Current status (June 2026)
 
-**Sprints 1–8 are complete.** DockLab supports local and remote Docker workspaces with browser terminals, Terraform EC2 provisioning with SSH bootstrap, idle workspace and EC2 lifecycle automation, estimated cloud cost visibility, and CI quality gates.
+**All planned phases (1–10) are complete, including the former "avoid initially" stretch scope.** DockLab supports local and remote Docker workspaces with browser terminals, Terraform EC2 provisioning with SSH bootstrap, idle lifecycle automation, durable usage/cost tracking with budgets, production hardening (refresh tokens, OAuth, rate limits, quotas, metrics, alerts, secrets, CD), and the advanced feature set: browser IDE, workspace snapshots, environment sharing with collaborative terminals, GitHub repo auto-clone, a template marketplace, and an optional Kubernetes runtime backend.
 
-**Core remote development works** when AWS credentials, Terraform state backend, and an EC2 SSH private key are configured. Remaining viability gaps: production deployment and operational hardening.
+**Core remote development works** when AWS credentials, Terraform state backend, and an EC2 SSH private key are configured. Remaining work is polish (see "Not implemented yet").
 
 For sprint-level tracking, see [sprints.md](./sprints.md).
 
@@ -35,23 +35,32 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 | **Operations** | Postgres-persisted operation queue; polling API; survives restarts |
 | **Reconciliation** | Stale operation and provisioning-state repair (startup + every 5 min) |
 | **Auto-sleep** | Idle workspace containers stopped after `IDLE_STOP_AFTER_MINUTES`; idle EC2 stopped/terminated per cloud lifecycle policy |
-| **Cost visibility** | Dashboard usage/cost estimates from `cloud_instance_type` + `cloud_provisioned_at` |
-| **CI** | GitHub Actions: Go fmt/tests, frontend lint/build, Docker build |
+| **Cost tracking** | Persisted `environment_usage` sessions, AWS Pricing API rates (static fallback), per-environment billing rollups, monthly budgets + alerts |
+| **Auth hardening** | Rotating JWT refresh tokens, logout/revocation, GitHub OAuth login |
+| **Abuse protection** | Per-IP rate limiting (auth/provision/API budgets), per-user environment and operation quotas |
+| **Observability** | Prometheus `/metrics`, webhook alerting (operations, lifecycle, reconciliation, budgets) |
+| **Secrets** | Optional AWS Secrets Manager bootstrap at startup; production needs no `.env` (IAM-role credential chain, base64 SSH key from the secret, only `POSTGRES_PASSWORD` exported for the co-located DB) |
+| **Browser IDE** | code-server sidecar per workspace sharing the `/workspace` volume (local + EC2 via port 8443) |
+| **Snapshots** | `docker commit` snapshot/restore/delete; named workspace volumes survive restores |
+| **Collaboration** | Environment sharing by email; multi-client shared terminal sessions |
+| **GitHub integration** | OAuth login + `repo_url` auto-clone into `/workspace` at create |
+| **Templates** | Curated template catalog API + dashboard picker |
+| **Kubernetes** | Optional `DOKLAB_RUNTIME=kubernetes` backend (Deployments via kubectl; scale 0/1 stop/start) |
+| **CI/CD** | GitHub Actions CI + CD (GHCR images, optional SSH deploy, `docker-compose.prod.yml`) |
 
 ### Not implemented yet
 
 | Priority | Gap | Impact |
 |----------|-----|--------|
-| **P1** | Production deployment (CD) | No hosted environment; dev-only Docker Compose |
-| **P2** | Monitoring, alerting, rate limiting | Not operable under real load or abuse |
-| **P3** | Persisted usage history and accurate pricing | Cost view is live estimate only |
-| **P3** | JWT refresh tokens | Sessions expire without renewal |
 | **P3** | Per-user lifecycle policy | Global env thresholds only |
-| **Future** | IDE in browser, K8s, templates, collaboration | Stretch goals |
+| **P3** | Distributed rate limiting (Redis) | In-memory limiter is per-instance |
+| **P3** | K8s snapshots/IDE + PVC persistence | Advanced features are Docker-only |
+| **P3** | TLS/reverse proxy for IDE in production | IDE served over plain HTTP with password auth |
+| **P4** | Managed runtime (ECS/Fly.io) | CD targets a Docker Compose host |
 
 ### Current focus
 
-**Sprint 9 — Production hardening and deployment.** CD, monitoring, rate limiting, and secrets management.
+**Polish and operations.** All planned scope is delivered; remaining work is the polish list above plus real-world load testing.
 
 ---
 
@@ -62,25 +71,23 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 | Layer | Choice |
 |-------|--------|
 | Frontend | React 19, TypeScript, Tailwind CSS 4, React Router, Vite, xterm.js |
-| Backend | Go 1.25, Gin, Gorilla WebSocket, creack/pty, pgx/v5, golang.org/x/crypto/ssh |
+| Backend | Go 1.25, Gin, Gorilla WebSocket, creack/pty, pgx/v5, golang.org/x/crypto/ssh, prometheus/client_golang, aws-sdk-go-v2 (EC2, Pricing, Secrets Manager) |
 | Database | PostgreSQL 16 |
-| Infrastructure | Terraform 1.9, AWS EC2, Docker CLI (local + remote over SSH) |
-| DevOps | Docker Compose, GitHub Actions (CI) |
+| Infrastructure | Terraform 1.9, AWS EC2, Docker CLI (local + remote over SSH), optional kubectl (Kubernetes backend), code-server (browser IDE) |
+| DevOps | Docker Compose (dev + prod), GitHub Actions (CI + CD → GHCR + SSH deploy), nginx (frontend image) |
 
 ### Planned / optional
 
 | Layer | Choice | When |
 |-------|--------|------|
-| Caching / queues | Redis | Optional, if async scale requires it |
-| Monitoring | Prometheus + Grafana or CloudWatch | Sprint 9 |
-| Deployment | GitHub Actions CD → hosted runtime | Sprint 9 |
-| Reverse proxy | Nginx or ALB | Sprint 9 |
+| Caching / queues | Redis | If multi-replica rate limiting or async scale requires it |
+| Dashboards | Grafana on top of `/metrics` | When operating a hosted instance |
+| Managed runtime | ECS / Fly.io | If the Compose host outgrows its capacity |
 
-### Deliberately not used (yet)
+### Deliberately not used
 
 - TanStack Query — dashboard uses direct fetch + local state
 - Zustand/Redux — not needed at current scale
-- Kubernetes — Docker is sufficient for MVP
 
 ---
 
@@ -90,14 +97,17 @@ For sprint-level tracking, see [sprints.md](./sprints.md).
 
 ```text
 React Frontend
-       ↓ HTTP / WebSocket
-Go API Server
-       ├── Docker CLI  →  Local workspace containers (runtime_target = local)
-       └── Terraform CLI  →  AWS EC2 (Docker user-data, SSH security group)
+       ↓ HTTP / WebSocket (token pair w/ auto-refresh; GitHub OAuth)
+Go API Server (middleware: JWT, rate limiting, Prometheus metrics)
+       ├── Docker CLI  →  Local workspace containers + code-server IDE sidecars (runtime_target = local)
+       ├── kubectl     →  Kubernetes Deployments (DOKLAB_RUNTIME = kubernetes)
+       └── Terraform CLI  →  AWS EC2 (Docker user-data, SSH + IDE security group)
               ↓ SSH + remote Docker CLI
-         Workspace container on EC2 (runtime_target = remote)
-PostgreSQL (users, environments, operations)
-Background workers: reconciliation, lifecycle (idle workspace stop + idle EC2 stop/terminate)
+         Workspace container + IDE sidecar on EC2 (runtime_target = remote)
+PostgreSQL (users, environments, operations, refresh_tokens, environment_usage,
+            user_settings, environment_shares, environment_snapshots)
+Background workers: reconciliation, lifecycle (idle workspace/EC2 stop + terminate), budget watcher
+Observability: /metrics (Prometheus) + webhook alerts; secrets via AWS Secrets Manager (optional)
 ```
 
 ---
@@ -107,19 +117,21 @@ Background workers: reconciliation, lifecycle (idle workspace stop + idle EC2 st
 ```text
 cmd/server/           # API entrypoint
 internal/
-  handlers/           # HTTP + WebSocket handlers
-  services/           # Auth, environment, terminal, terraform, lifecycle, reconciliation
+  handlers/           # HTTP + WebSocket handlers (auth, env, usage, snapshots, shares, IDE)
+  services/           # Auth, OAuth, environment, terminal, terraform, lifecycle, reconciliation,
+                      # usage, pricing, snapshots, shares, IDE, K8s runtime, metrics, alerts
   repositories/       # PostgreSQL access
   models/             # Domain types
-  middleware/         # JWT
-  config/             # Env config
+  middleware/         # JWT, rate limiting, metrics
+  config/             # Env config + AWS Secrets Manager loader
   database/           # Pool + schema bootstrap
 pkg/logger/
-frontend/             # React dashboard
+frontend/             # React dashboard (+ production Dockerfile/nginx.conf)
 plan/                 # This plan + sprints
-.github/workflows/    # CI
-docker-compose.yml
-Dockerfile            # Backend + Terraform CLI
+.github/workflows/    # CI + CD
+docker-compose.yml         # Dev stack
+docker-compose.prod.yml    # Production stack (GHCR images)
+Dockerfile            # Backend + Terraform CLI + kubectl
 ```
 
 ---
@@ -129,15 +141,15 @@ Dockerfile            # Backend + Terraform CLI
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Project foundation | ✅ Complete |
-| 2 | Authentication | ✅ Complete (refresh tokens deferred) |
+| 2 | Authentication | ✅ Complete (refresh tokens + GitHub OAuth) |
 | 3 | Local Docker environments | ✅ Complete |
-| 4 | Browser terminal | ✅ Complete (local only) |
-| 5 | Terraform integration | ✅ Complete (MVP slice) |
+| 4 | Browser terminal | ✅ Complete (local, SSH remote, K8s exec; shared multi-client) |
+| 5 | Terraform integration | ✅ Complete |
 | 6 | Remote container orchestration | ✅ Complete |
 | 7 | Auto-sleep & lifecycle automation | ✅ Complete |
-| 8 | Cost tracking dashboard | 🟡 Partial (estimates only) |
-| 9 | Production hardening | 🟡 Partial (CI only; no CD/monitoring) |
-| 10 | Advanced features | 🔲 Future |
+| 8 | Cost tracking dashboard | ✅ Complete (persisted usage, Pricing API, budgets) |
+| 9 | Production hardening | ✅ Complete (CD, rate limits, quotas, metrics, alerts, secrets) |
+| 10 | Advanced features | ✅ Complete (IDE, snapshots, sharing, GitHub, templates, K8s) |
 
 ---
 
@@ -171,12 +183,12 @@ Implement secure user authentication and session management.
 - Protected routes and session persistence in frontend
 - `users` table: id, email, password_hash, created_at, updated_at
 
-## Deferred
-- Refresh tokens
-- OAuth / GitHub login
+## Delivered later (Sprint 9)
+- Rotating single-use JWT refresh tokens with logout/revocation (`refresh_tokens` table, SHA-256 hashed)
+- GitHub OAuth login with signed-JWT state and user upsert (`auth_provider`)
 
 ## Success criteria — Met
-- Users can securely authenticate; API routes are protected
+- Users can securely authenticate; API routes are protected; sessions renew without re-login
 
 ---
 
@@ -281,37 +293,25 @@ Prevent unnecessary cloud and local resource costs.
 
 ---
 
-# PHASE 8 — Cost Tracking Dashboard 🟡 PARTIAL
+# PHASE 8 — Cost Tracking Dashboard ✅
 
 ## Goal
 Provide visibility into infrastructure costs.
 
 ## Delivered
 - `cloud_instance_type` and `cloud_provisioned_at` persisted on environments
-- Dashboard **Usage & Cost** view with accrued spend and monthly run-rate estimates
-- Hardcoded on-demand rates for common t3 instance types
+- `environment_usage` table: per-session hourly rate, started/ended timestamps, runtime minutes, estimated cost
+- Sessions open/close automatically as EC2 becomes billable (provision, start, stop, terminate, delete, reconciliation)
+- AWS Pricing API integration with caching and a static on-demand fallback table
+- Dashboard **Usage & Cost** view: month-to-date and all-time totals, per-environment cost bars, usage session history
+- Monthly budgets (`user_settings`) with a budget watcher worker and webhook alerts on overruns
 
-## Remaining
-
-```sql
-environment_usage  -- not yet created
-- environment_id
-- runtime_minutes
-- estimated_cost
-- started_at
-- ended_at
-```
-
-- Usage history UI with charts
-- AWS Pricing API for regional accuracy
-- Cost alerts or budget thresholds
-
-## Success criteria (full)
+## Success criteria — Met
 - Users understand historical usage and cost, not just live estimates
 
 ---
 
-# PHASE 9 — Production Hardening 🟡 PARTIAL
+# PHASE 9 — Production Hardening ✅
 
 ## Goal
 Make the platform production-quality and deployable.
@@ -320,61 +320,66 @@ Make the platform production-quality and deployable.
 - Structured JSON logging
 - Health checks with DB connectivity
 - GitHub Actions CI (fmt, tests, lint, build, Docker image build)
+- GitHub Actions CD: GHCR image build/push (backend + frontend) and optional SSH deploy to a Docker Compose host (`docker-compose.prod.yml`)
+- Per-IP token bucket rate limiting (auth / provisioning / general API budgets)
+- Prometheus `/metrics`: HTTP, operations, environments, terminal sessions, lifecycle, alerts
+- Webhook alerting for failed operations, lifecycle actions/failures, reconciliation repairs, and budget overruns
+- AWS Secrets Manager bootstrap for production secrets
+- Per-user resource quotas (max environments, max concurrent operations)
+- JWT refresh tokens + GitHub OAuth (listed under Phase 2)
 - Graceful shutdown with background worker cancellation
-- Input validation on provisioning requests
-- In-app confirmation for destructive actions
+- Input validation on provisioning requests; repo URL validation hardened against shell injection
+- Expanded unit test coverage (refresh tokens, rate limiter, pricing, templates, repo validation)
 
-## Remaining
-- Deployment pipeline (CD)
-- Rate limiting
-- Metrics and alerting (Prometheus/Grafana or CloudWatch)
-- Secrets management (AWS Secrets Manager, SSM, or similar)
-- Resource quotas per user
+## Remaining (polish)
+- Distributed rate limiting for multi-replica deployments
 - Container isolation hardening and network restrictions
-- Expanded integration test coverage
 - Retry systems for transient Terraform/SSH failures
+- Load testing under concurrent usage
 
-## Success criteria
-- Platform is stable and operable under concurrent usage in a hosted environment
-
----
-
-# PHASE 10 — Advanced Features (Future)
-
-Optional enhancements after the core product is viable:
-
-| Feature | Description |
-|---------|-------------|
-| Browser VS Code | code-server integration |
-| Kubernetes | Replace Docker orchestration with K8s scheduling |
-| Workspace persistence | Snapshot and restore environments |
-| Collaborative sessions | Shared terminals, multi-user workspaces |
-| GitHub integration | OAuth login, auto-clone repositories |
-| Template marketplace | Prebuilt Node.js, Go, Python environments |
+## Success criteria — Met
+- Platform is deployable to a hosted environment with monitoring, alerting, and abuse protections
 
 ---
 
-## Recommended MVP scope
+# PHASE 10 — Advanced Features ✅
+
+All former stretch goals are delivered:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Browser VS Code | ✅ | code-server sidecar sharing the workspace volume; localhost port locally, port 8443 on EC2 |
+| Kubernetes | ✅ | Optional `DOKLAB_RUNTIME=kubernetes` backend; Deployments via kubectl, scale 0/1 for stop/start |
+| Workspace persistence | ✅ | `docker commit` snapshots with restore; named `/workspace` volumes survive restores |
+| Collaborative sessions | ✅ | Environment sharing by email; multi-client shared terminal PTYs |
+| GitHub integration | ✅ | OAuth login + `repo_url` auto-clone at create time |
+| Template marketplace | ✅ | Curated catalog API + dashboard picker (Node.js, Go, Python, Rust, Java, base) |
+
+Known boundaries: snapshots and the IDE sidecar require a Docker runtime (not available on the Kubernetes backend); IDE traffic is HTTP + password (put a TLS proxy in front for production).
+
+---
+
+## Scope summary
 
 ### Built ✅
-- Authentication
-- Docker workspace creation (local + remote)
-- Browser terminal (local + remote over SSH)
+- Authentication (passwords, refresh tokens, GitHub OAuth)
+- Docker workspace creation (local + remote + optional Kubernetes)
+- Browser terminal (local, remote over SSH, K8s exec; shared multi-client sessions)
+- Browser IDE (code-server)
 - Terraform EC2 provisioning with Docker bootstrap
 - Auto-sleep (workspace containers + idle EC2 stop/terminate)
-- Cost estimates (live)
-- CI quality gates
-- Remote health checks
+- Durable cost tracking (usage sessions, Pricing API, budgets, alerts)
+- Workspace snapshots and environment sharing
+- Templates and repo auto-clone
+- Production hardening (rate limits, quotas, metrics, alerts, secrets)
+- CI + CD (GHCR images, SSH deploy, prod compose)
 
-### Build next
-1. Production deployment and hardening (Phase 9 completion)
-2. Durable cost tracking (Phase 8 completion)
-
-### Avoid initially
-- Kubernetes
-- Full billing systems
-- Multi-user collaboration
-- Full IDE in browser
+### Polish backlog
+1. Per-user lifecycle policies
+2. Distributed rate limiting (Redis) for multi-replica deployments
+3. K8s feature parity (PVC-backed persistence, IDE)
+4. TLS reverse proxy for IDE access
+5. Load testing and container isolation hardening
 
 ---
 
@@ -382,18 +387,12 @@ Optional enhancements after the core product is viable:
 
 | # | Challenge | Status |
 |---|-----------|--------|
-| 1 | PTY + WebSocket streaming | ✅ Local and remote SSH paths |
-| 2 | Infrastructure state management | ✅ Reconciliation + remote Terraform state |
-| 3 | Security isolation | 🟡 Basic; needs quotas and hardening |
-| 4 | Cleanup logic | 🟡 Workspace idle stop done; EC2 idle cleanup missing |
-| 5 | Concurrent session handling | 🟡 Works at MVP scale; needs load testing |
-| 6 | Remote SSH + Docker reliability | ✅ Implemented; production hardening remains |
-
----
-
-## Resume description
-
-> Built a cloud-based remote development platform using React, Go, Terraform, Docker, and AWS EC2. Implemented browser-based terminal streaming over WebSockets, automated infrastructure provisioning, containerized developer environments, lifecycle automation, async operation tracking, and real-time cost estimation. CI pipeline with GitHub Actions.
+| 1 | PTY + WebSocket streaming | ✅ Local, remote SSH, and K8s exec paths; multi-client broadcast |
+| 2 | Infrastructure state management | ✅ Reconciliation + remote Terraform state + usage session hooks |
+| 3 | Security isolation | ✅ Quotas + rate limits; container/network hardening remains polish |
+| 4 | Cleanup logic | ✅ Workspace idle stop, EC2 idle stop/terminate, volume cleanup on delete |
+| 5 | Concurrent session handling | 🟡 Works at current scale; needs load testing |
+| 6 | Remote SSH + Docker reliability | ✅ Implemented; retry systems for transient failures remain polish |
 
 ---
 

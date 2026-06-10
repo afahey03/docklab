@@ -16,13 +16,16 @@ type APIErrorResponse struct {
 
 type EnvironmentHandler struct {
 	environmentService *services.EnvironmentService
+	shareService       *services.ShareService
 }
 
 type CreateEnvironmentRequest struct {
-	Name      string                       `json:"name"`
-	Image     string                       `json:"image"`
-	Target    string                       `json:"target"`
-	Provision *ProvisionEnvironmentRequest `json:"provision"`
+	Name       string                       `json:"name"`
+	Image      string                       `json:"image"`
+	Target     string                       `json:"target"`
+	RepoURL    string                       `json:"repo_url"`
+	TemplateID string                       `json:"template_id"`
+	Provision  *ProvisionEnvironmentRequest `json:"provision"`
 }
 
 type CreateEnvironmentResponse struct {
@@ -37,8 +40,11 @@ type ProvisionEnvironmentRequest struct {
 	KeyName      string `json:"key_name"`
 }
 
-func NewEnvironmentHandler(environmentService *services.EnvironmentService) *EnvironmentHandler {
-	return &EnvironmentHandler{environmentService: environmentService}
+func NewEnvironmentHandler(environmentService *services.EnvironmentService, shareService *services.ShareService) *EnvironmentHandler {
+	return &EnvironmentHandler{
+		environmentService: environmentService,
+		shareService:       shareService,
+	}
 }
 
 func (h *EnvironmentHandler) Create(c *gin.Context) {
@@ -50,9 +56,11 @@ func (h *EnvironmentHandler) Create(c *gin.Context) {
 
 	userEmail := c.GetString("user_email")
 	input := services.CreateEnvironmentInput{
-		Name:   req.Name,
-		Image:  req.Image,
-		Target: req.Target,
+		Name:       req.Name,
+		Image:      req.Image,
+		Target:     req.Target,
+		RepoURL:    req.RepoURL,
+		TemplateID: req.TemplateID,
 	}
 	if req.Provision != nil {
 		input.Provision = services.ProvisionRequest{
@@ -87,7 +95,20 @@ func (h *EnvironmentHandler) List(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"environments": environments})
+	response := gin.H{"environments": environments}
+	if h.shareService != nil {
+		shared, sharedErr := h.shareService.ListSharedWithUser(c.Request.Context(), userEmail)
+		if sharedErr == nil {
+			response["shared_environments"] = shared
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ListTemplates exposes the curated template marketplace catalog.
+func (h *EnvironmentHandler) ListTemplates(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"templates": services.EnvironmentTemplates})
 }
 
 func (h *EnvironmentHandler) Get(c *gin.Context) {
@@ -236,6 +257,18 @@ func (h *EnvironmentHandler) handleServiceError(c *gin.Context, err error) {
 	}
 	if errors.Is(err, services.ErrOperationNotFound) {
 		c.JSON(http.StatusNotFound, APIErrorResponse{Code: "operation_not_found", Error: "operation not found"})
+		return
+	}
+	if errors.Is(err, services.ErrEnvironmentQuotaExceeded) {
+		c.JSON(http.StatusTooManyRequests, APIErrorResponse{Code: "environment_quota_exceeded", Error: err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrOperationQuotaExceeded) {
+		c.JSON(http.StatusTooManyRequests, APIErrorResponse{Code: "operation_quota_exceeded", Error: err.Error()})
+		return
+	}
+	if errors.Is(err, services.ErrKubectlUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, APIErrorResponse{Code: "kubectl_unavailable", Error: err.Error()})
 		return
 	}
 

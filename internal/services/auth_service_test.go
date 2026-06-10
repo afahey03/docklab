@@ -40,6 +40,20 @@ func (r *fakeUserRepo) Create(_ context.Context, email, passwordHash string) (*m
 	return user, nil
 }
 
+func (r *fakeUserRepo) UpsertOAuth(_ context.Context, email, passwordHash, provider string) (*models.User, error) {
+	if existing, ok := r.users[email]; ok {
+		return existing, nil
+	}
+	user := &models.User{
+		ID:           "user-oauth-1",
+		Email:        email,
+		Password:     passwordHash,
+		AuthProvider: provider,
+	}
+	r.users[email] = user
+	return user, nil
+}
+
 func TestRegisterAndLoginSuccess(t *testing.T) {
 	repo := newFakeUserRepo()
 	svc := NewAuthService(repo, "test-secret", 60)

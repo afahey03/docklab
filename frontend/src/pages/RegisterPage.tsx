@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 import { register } from "../lib/api";
-import { setToken } from "../lib/auth";
+import { setTokens } from "../lib/auth";
 
 export function RegisterPage() {
     const navigate = useNavigate();
@@ -17,8 +17,8 @@ export function RegisterPage() {
         setIsSubmitting(true);
 
         try {
-            const token = await register(email.trim(), password);
-            setToken(token);
+            const pair = await register(email.trim(), password);
+            setTokens(pair.token, pair.refresh_token);
             navigate("/dashboard", { replace: true });
         } catch (requestError) {
             setError(

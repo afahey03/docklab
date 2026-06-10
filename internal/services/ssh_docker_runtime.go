@@ -75,13 +75,23 @@ func isWorkspaceRemoteCleanupIgnorable(err error) bool {
 }
 
 func (r *SSHDockerRuntime) CreateWorkspace(ctx context.Context, name, image string, labels map[string]string) (string, error) {
-	args := []string{"run", "-d", "--name", name}
+	args := []string{"run", "-d", "--name", name, "-v", WorkspaceVolumeName(name) + ":/workspace", "-w", "/workspace"}
 	for key, value := range labels {
 		args = append(args, "--label", fmt.Sprintf("%s=%s", key, value))
 	}
 	args = append(args, image, "sleep", "infinity")
 
 	return r.runDocker(ctx, args...)
+}
+
+func (r *SSHDockerRuntime) CommitWorkspace(ctx context.Context, containerRef, imageTag string) error {
+	_, err := r.runDocker(ctx, "commit", containerRef, imageTag)
+	return err
+}
+
+func (r *SSHDockerRuntime) DeleteWorkspaceVolume(ctx context.Context, workspaceName string) error {
+	_, err := r.runDocker(ctx, "volume", "rm", "-f", WorkspaceVolumeName(workspaceName))
+	return err
 }
 
 func (r *SSHDockerRuntime) InspectWorkspace(ctx context.Context, name string) (containerID string, running bool, err error) {

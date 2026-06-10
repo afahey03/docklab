@@ -33,6 +33,9 @@ type CloudLifecycleService struct {
 	ec2             EC2InstanceClient
 	policy          CloudLifecyclePolicy
 	log             *slog.Logger
+	usage           *UsageService
+	metrics         *Metrics
+	alerts          *AlertService
 }
 
 func NewCloudLifecycleService(
@@ -75,6 +78,15 @@ func NewCloudLifecycleService(
 
 func (s *CloudLifecycleService) Policy() CloudLifecyclePolicy {
 	return s.policy
+}
+
+func (s *CloudLifecycleService) SetUsageService(usage *UsageService) {
+	s.usage = usage
+}
+
+func (s *CloudLifecycleService) SetObservability(metrics *Metrics, alerts *AlertService) {
+	s.metrics = metrics
+	s.alerts = alerts
 }
 
 func (s *CloudLifecycleService) Start(ctx context.Context, workspaceLifecycle *LifecycleService) {
@@ -191,6 +203,10 @@ func (s *CloudLifecycleService) stopIdleCloudInstances(ctx context.Context) {
 
 		_, _ = s.environmentRepo.UpdateStatus(ctx, env.ID, env.UserEmail, statusStopped)
 
+		// A stopped instance no longer bills for compute; close the usage session.
+		s.usage.CloseSession(ctx, env.ID)
+		s.metrics.RecordLifecycleAction("cloud_stop")
+
 		_, err = s.environmentRepo.UpdateProvisioning(
 			ctx,
 			env.ID,
@@ -245,7 +261,15 @@ func (s *CloudLifecycleService) terminateIdleCloudInstances(ctx context.Context)
 				"environment_id", env.ID,
 				"error", err,
 			)
+			s.alerts.Send("cloud_terminate_failed", "error", "idle EC2 terminate failed", map[string]any{
+				"environment_id": env.ID,
+				"instance_id":    env.InstanceID,
+				"error":          err.Error(),
+			})
+			continue
 		}
+		s.usage.CloseSession(ctx, env.ID)
+		s.metrics.RecordLifecycleAction("cloud_terminate")
 	}
 }
 

@@ -8,7 +8,7 @@ Cloud-based remote development environment platform. Users authenticate, manage 
 
 ## Current status
 
-**All planned scope through Sprint 10 — including former "avoid initially" stretch goals — is implemented (June 2026).** On top of the Sprint 1–8 MVP (auth, local/remote Docker workspaces, browser terminals, Terraform EC2 provisioning with bootstrap, idle lifecycle automation, reconciliation), the platform now ships:
+On top of the Sprint 1–8 MVP (auth, local/remote Docker workspaces, browser terminals, Terraform EC2 provisioning with bootstrap, idle lifecycle automation, reconciliation), the platform now ships:
 
 - **Production hardening:** JWT refresh tokens with rotation, GitHub OAuth login, per-IP rate limiting, per-user resource quotas, Prometheus `/metrics`, webhook alerting, AWS Secrets Manager bootstrap (production runs with no `.env` file: IAM-role credentials and a base64 SSH key from the secret), CD workflow (GHCR images + SSH deploy) with `docker-compose.prod.yml`
 - **Durable cost tracking:** persisted `environment_usage` sessions, AWS Pricing API rates (with static fallback), billing summary with per-environment rollups, monthly budgets with alerts
